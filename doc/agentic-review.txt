@@ -285,4 +285,20 @@ defaults. The claude adapter runs `deep` and `review` on opus and the other
 actions on sonnet. The agent pane and the float show the model that is
 answering.
 
+                                                   *agentic-review-highlights*
+The agent pane and the float colour their lines with these groups. Each is
+defined with `default`, so your own |nvim_set_hl()| wins.
+
+  AgenticReviewHigh      severity tags, as badges in the DiagnosticError,
+  AgenticReviewMedium    DiagnosticWarn, DiagnosticInfo and DiagnosticHint
+  AgenticReviewLow       colours
+  AgenticReviewQuestion
+  AgenticReviewTitle     finding titles, links to Title
+  AgenticReviewTool      tool names in tool call lines, links to Function
+  AgenticReviewCommand   commands and paths in tool call lines, links to
+                         String
+  AgenticReviewRef       path:line references, links to Underlined
+  AgenticReviewMeta      answer times and cancellations, links to Comment
+  AgenticReviewError     agent errors, links to DiagnosticError
+
  vim:tw=78:ts=8:ft=help:norl:

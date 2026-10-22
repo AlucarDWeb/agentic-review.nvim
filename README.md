@@ -176,6 +176,20 @@ Defaults:
 
 Each action picks its model from `models`, then `model`, then the adapter's own defaults. The claude adapter runs `deep` and `review` on opus and the other actions on sonnet. The agent pane and the float show the model that is answering.
 
+### Highlights
+
+The agent pane and the float colour their lines with these groups, each defined with `default`, so a `vim.api.nvim_set_hl()` in your config wins:
+
+| Group | Used for | Default |
+| --- | --- | --- |
+| `AgenticReviewHigh`, `AgenticReviewMedium`, `AgenticReviewLow`, `AgenticReviewQuestion` | Finding severity tags | Badges in the `DiagnosticError`, `DiagnosticWarn`, `DiagnosticInfo` and `DiagnosticHint` colours |
+| `AgenticReviewTitle` | Finding titles | `Title` |
+| `AgenticReviewTool` | Tool names in tool call lines | `Function` |
+| `AgenticReviewCommand` | Commands and paths in tool call lines | `String` |
+| `AgenticReviewRef` | `path:line` references | `Underlined` |
+| `AgenticReviewMeta` | Answer times and cancellations | `Comment` |
+| `AgenticReviewError` | Agent errors | `DiagnosticError` |
+
 ## Development
 
 ```sh

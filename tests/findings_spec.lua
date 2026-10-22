@@ -16,6 +16,7 @@ H.run(function()
   }, "\n")
   local prompts, models = {}, {}
   local fake = H.fake_agent(answer, {
+    tool = H.repo .. "/src/cart.lua",
     on_spawn = function(ctx)
       models[#models + 1] = ctx.model
     end,
@@ -61,6 +62,45 @@ H.run(function()
   rg.action("review")
   H.wait_answers(pane, 1)
   check("review header", text(pane):find("## Review", 1, true) ~= nil, text(pane))
+
+  -- The pane colours tool calls, severity badges, titles, path:line references and timing lines.
+  local pns = vim.api.nvim_get_namespaces().agentic_review_pane
+  local function painted(fragment)
+    for i, l in ipairs(lines(pane)) do
+      if l:find(fragment, 1, true) then
+        local groups = {}
+        for _, m in ipairs(vim.api.nvim_buf_get_extmarks(pane, pns, { i - 1, 0 }, { i - 1, -1 }, { details = true })) do
+          groups[#groups + 1] = l:sub(m[3] + 1, m[4].end_col) .. "=" .. m[4].hl_group
+        end
+        table.sort(groups)
+        return groups
+      end
+    end
+  end
+  check(
+    "tool line colours",
+    vim.deep_equal(painted("> Read"), { "Read=AgenticReviewTool", "`src/cart.lua`=AgenticReviewCommand" }),
+    painted("> Read")
+  )
+  check(
+    "finding colours",
+    vim.deep_equal(painted("[high]"), {
+      "[high]=AgenticReviewHigh",
+      "apply_discount` is never defined=AgenticReviewTitle",
+      "src/cart.lua:17=AgenticReviewRef",
+    }),
+    painted("[high]")
+  )
+  check(
+    "timing line dimmed",
+    vim.deep_equal(painted("s_"), { lines(pane)[#lines(pane) - 1] .. "=AgenticReviewMeta" }),
+    painted("s_")
+  )
+  local badge = vim.api.nvim_get_hl(0, { name = "AgenticReviewHigh" })
+  check("severity badge has a background", badge.bg ~= nil or badge.link ~= nil, badge)
+  vim.api.nvim_set_hl(0, "AgenticReviewTool", { fg = 0xff00ff })
+  vim.api.nvim_exec_autocmds("ColorScheme", {})
+  check("user colours survive", vim.api.nvim_get_hl(0, { name = "AgenticReviewTool" }).fg == 0xff00ff)
   check(
     "whole change in prompt",
     (prompts[1] or ""):find("careful reviewer", 1, true) ~= nil and prompts[1]:find("src/discount.lua", 1, true) ~= nil,

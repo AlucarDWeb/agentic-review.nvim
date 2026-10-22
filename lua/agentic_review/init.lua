@@ -228,6 +228,78 @@ local SEVERITY_HL =
 local STORE = vim.fn.stdpath("state") .. "/agentic_review.json"
 local ns = vim.api.nvim_create_namespace("agentic_review")
 local cns = vim.api.nvim_create_namespace("agentic_review_comments")
+local pns = vim.api.nvim_create_namespace("agentic_review_pane")
+local BADGES = {
+  high = { "AgenticReviewHigh", "DiagnosticError" },
+  medium = { "AgenticReviewMedium", "DiagnosticWarn" },
+  low = { "AgenticReviewLow", "DiagnosticInfo" },
+  question = { "AgenticReviewQuestion", "DiagnosticHint" },
+}
+
+-- Severity tags are badges in the theme's diagnostic colours; the other groups are plain links.
+local function define_highlights()
+  local function fg(name)
+    local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = name, link = false })
+    return ok and hl.fg or nil
+  end
+  local ink = vim.api.nvim_get_hl(0, { name = "Normal", link = false }).bg or 0
+  for _, badge in pairs(BADGES) do
+    local color = fg(badge[2])
+    vim.api.nvim_set_hl(
+      0,
+      badge[1],
+      color and { fg = ink, bg = color, bold = true, default = true } or { link = badge[2], default = true }
+    )
+  end
+  local links = {
+    AgenticReviewTool = "Function",
+    AgenticReviewCommand = "String",
+    AgenticReviewRef = "Underlined",
+    AgenticReviewTitle = "Title",
+    AgenticReviewMeta = "Comment",
+    AgenticReviewError = "DiagnosticError",
+  }
+  for name, target in pairs(links) do
+    vim.api.nvim_set_hl(0, name, { link = target, default = true })
+  end
+end
+
+-- Colours rows first to last-1 of a pane: tool calls, findings, path:line references and timing lines.
+local function paint(buf, first, last)
+  vim.api.nvim_buf_clear_namespace(buf, pns, first, last)
+  local function hl(row, s, e, group)
+    vim.api.nvim_buf_set_extmark(buf, pns, row, s, { end_col = e, hl_group = group, priority = 5000 })
+  end
+  for i, line in ipairs(vim.api.nvim_buf_get_lines(buf, first, last, false)) do
+    local row = first + i - 1
+    local tool, detail = line:match("^> ([%w_]+) (`.*`)$")
+    tool = tool or line:match("^> ([%w_]+)$")
+    if tool then
+      hl(row, 2, 2 + #tool, "AgenticReviewTool")
+      if detail then
+        hl(row, 3 + #tool, #line, "AgenticReviewCommand")
+      end
+    elseif line:match("^_%d+s_$") or line == "_cancelled_" then
+      hl(row, 0, #line, "AgenticReviewMeta")
+    elseif line:match("^_error: .*_$") then
+      hl(row, 0, #line, "AgenticReviewError")
+    else
+      local severity = line:match(FINDING)
+      local badge = severity and BADGES[severity:lower()]
+      if badge then
+        local s, e = line:find("%[%a+%]")
+        hl(row, s - 1, e, badge[1])
+        local title = line:find("[^`:%s]", select(2, line:find(REF, e)) + 1)
+        if title then
+          hl(row, title - 1, #line, "AgenticReviewTitle")
+        end
+      end
+      for s, _, _, e in line:gmatch("()" .. REF .. "()") do
+        hl(row, s - 1, e - 1, "AgenticReviewRef")
+      end
+    end
+  end
+end
 
 local GH_PENDING = [[
 query($owner: String!, $repo: String!, $number: Int!) {
@@ -474,6 +546,7 @@ local function pane_append(c, text)
   vim.bo[buf].modifiable = true
   vim.api.nvim_buf_set_lines(buf, n - 1, n, false, lines)
   vim.bo[buf].modifiable = false
+  paint(buf, n - 1, -1)
   local win = c.win
   if displays(win, buf) and (win ~= vim.api.nvim_get_current_win() or vim.api.nvim_win_get_cursor(win)[1] >= n) then
     vim.api.nvim_win_set_cursor(win, { vim.api.nvim_buf_line_count(buf), 0 })
@@ -1552,6 +1625,7 @@ local function start(spec, fresh)
     vim.bo[state.bufs.agent].modifiable = true
     vim.api.nvim_buf_set_lines(state.bufs.agent, 0, -1, false, vim.fn.readfile(transcript))
     vim.bo[state.bufs.agent].modifiable = false
+    paint(state.bufs.agent, 0, -1)
     agent.last = "meta"
   end
   show(next_unviewed() or state.files[1])
@@ -2045,6 +2119,8 @@ function M.setup(opts)
   end, { range = true, desc = "Add a comment on the line or range to your pending GitHub review" })
   cmd("ReviewSubmit", M.submit, { desc = "Submit your pending GitHub review" })
   local group = vim.api.nvim_create_augroup("agentic_review", { clear = true })
+  define_highlights()
+  vim.api.nvim_create_autocmd("ColorScheme", { group = group, callback = define_highlights })
   vim.api.nvim_create_autocmd("TabClosed", {
     group = group,
     callback = function()
