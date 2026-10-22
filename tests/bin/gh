@@ -1,0 +1,2 @@
+#!/bin/sh
+exec nvim -u NONE -i NONE -n -l "$(dirname "$0")/gh.lua" "$@"

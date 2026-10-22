@@ -1,0 +1,253 @@
+*agentic-review.txt*       Code review in Neovim with a headless coding agent
+
+==============================================================================
+CONTENTS                                             *agentic-review-contents*
+
+  1. Introduction ........................... |agentic-review-intro|
+  2. Requirements ........................... |agentic-review-requirements|
+  3. Setup .................................. |agentic-review-setup|
+  4. Reviewing .............................. |agentic-review-review|
+  5. Asking the agent ....................... |agentic-review-ask|
+  6. GitHub comments ........................ |agentic-review-github|
+  7. Commands ............................... |agentic-review-commands|
+  8. Lua functions .......................... |agentic-review-lua|
+  9. Agents ................................. |agentic-review-agents|
+ 10. Configuration .......................... |agentic-review-config|
+
+==============================================================================
+1. INTRODUCTION                                         *agentic-review-intro*
+
+agentic-review opens a branch or a GitHub pull request in a review tab: the
+changed files in a suggested reading order, a side-by-side diff, and a pane
+where a headless agent explains, explores or digs into the hunk under the
+cursor. Outside a review, the same actions answer in a float under the code.
+Comments go to your pending GitHub review until you submit it.
+
+The agent is read-only. Claude Code (`claude`) and pi (`pi`) work out of the
+box, and any other headless CLI can be added as an adapter.
+
+==============================================================================
+2. REQUIREMENTS                                  *agentic-review-requirements*
+
+- Neovim 0.10 or newer
+- git
+- `claude` or `pi`, logged in, or a custom adapter
+- `gh`, logged in, for pull requests and comments
+
+Run `:checkhealth agentic_review` to see what is missing.
+
+==============================================================================
+3. SETUP                                                *agentic-review-setup*
+
+With lazy.nvim, `opts = {}` calls setup. Otherwise: >lua
+    require("agentic_review").setup({})
+<
+setup() creates the commands. The plugin sets no global keymaps; the README
+has a suggested `keys` table for lazy.nvim.
+
+==============================================================================
+4. REVIEWING                                           *agentic-review-review*
+
+`:Review` opens a tab with four columns: the changed files, the base and head
+versions in |diff-mode|, and the agent pane. When it opens, the agent writes
+an overview and reorders the files (see `auto_tour`).
+
+Files panel ~
+  <CR>          open the file under the cursor
+  v             toggle viewed
+  t             run the tour again
+  q             close the review
+
+Agent pane ~
+  <CR>, gf      jump to the path:line under the cursor
+
+Use |]c| and |[c| to move between hunks.
+
+The session, file order, viewed marks and the pane transcript are saved in
+|stdpath()| "state". Opening the same review again resumes the session and
+skips the tour. Untracked files are not listed, because `git diff` ignores
+them; `git add -N` adds them.
+
+==============================================================================
+5. ASKING THE AGENT                                       *agentic-review-ask*
+
+Four actions, run with |agentic_review.action()|:
+
+  explain       what the code does and why it is written that way
+  explore       callers, dependencies and related code, as path:line
+  deep          bugs, edge cases, lifecycle and concurrency problems and
+                missing tests, each checked against the code
+  ask           your own question
+
+In the review tab an action uses the hunk under the cursor, the visual
+selection, or in the files panel the whole file, and the answer streams into
+the agent pane.
+
+                                                        *agentic-review-float*
+In any other tab, the answer opens in a float under the selection, or under
+the cursor line plus 5 lines each side when nothing is selected. Near the
+bottom of the window it opens above the code. Each repository has one
+session, so follow-ups remember earlier questions.
+
+Float keys ~
+  a             ask a follow-up
+  <CR>, gf      jump to the path:line under the cursor
+  s             move the answer to a right split; later answers stream
+                there until it is closed
+  <C-c>         cancel the running answer
+  q, <Esc>      close
+
+==============================================================================
+6. GITHUB COMMENTS                                     *agentic-review-github*
+
+|:ReviewComment| on a line or range in the diff opens a float for the
+comment.
+
+  :w, :wq, <C-s>    add the comment to your pending review
+  gs                insert a `suggestion` block with the selected lines
+  q                 cancel
+
+Only a write command typed in the float sends the comment, so an autosave
+that runs |:wall| on |InsertLeave| or |TextChanged| does not post drafts.
+|:ReviewSubmit| submits the pending review.
+
+The comment is refused before anything is sent when the lines are outside a
+hunk, when the local HEAD is not the PR head, or when a head side comment is
+on a file with unpushed or unsaved changes, because the line numbers would
+not match GitHub. A branch review uses the PR that `gh pr view` finds.
+
+==============================================================================
+7. COMMANDS                                          *agentic-review-commands*
+
+                                                                     *:Review*
+:Review[!] [{base} | #{number}]
+    Review the current branch against its merge-base with {base}, which
+    defaults to `origin/HEAD` and then `origin/main`, `origin/master`,
+    `main` and `master`. Uncommitted changes are included; `:Review HEAD`
+    reviews only those. With #{number} (or {number}) review that pull
+    request through `gh`. It is fetched, not checked out, so the head side
+    is read-only unless the PR is already checked out. With [!] start fresh
+    instead of resuming the saved session.
+
+                                                                *:ReviewClose*
+:ReviewClose
+    Close the review tab, stop its agent and save its state.
+
+                                                               *:ReviewCancel*
+:ReviewCancel
+    Stop the answer that is running.
+
+                                                                 *:ReviewRefs*
+:ReviewRefs
+    Send every path:line in the last answer to the |quickfix| list.
+
+                                                                  *:ReviewAsk*
+:[range]ReviewAsk [{question}]
+    Ask about the range, or the hunk under the cursor. Without {question},
+    prompt for one.
+
+                                                              *:ReviewComment*
+:[range]ReviewComment
+    Write a GitHub comment on the line or range. See |agentic-review-github|.
+
+                                                               *:ReviewSubmit*
+:ReviewSubmit
+    Submit your pending review as Comment, Approve or Request changes.
+
+==============================================================================
+8. LUA FUNCTIONS                                          *agentic-review-lua*
+
+                                                     *agentic_review.setup()*
+setup({opts})       Apply |agentic-review-config| and create the commands.
+
+                                                      *agentic_review.open()*
+open({arg}, {fresh})
+                    Same as |:Review|; {fresh} is the [!].
+
+                                                    *agentic_review.action()*
+action({name}, {question}, {range})
+                    Run "explain", "explore", "deep" or "ask". {range} is
+                    `{ first, last }`; in visual mode the selection is used.
+
+                                                    *agentic_review.answer()*
+answer()            Reopen the last float answer for this repository.
+
+                                                   *agentic_review.comment()*
+comment({range})    Same as |:ReviewComment|.
+
+                                                    *agentic_review.submit()*
+submit()            Same as |:ReviewSubmit|.
+
+                                                      *agentic_review.next()*
+next({delta})       Open the next (1) or previous (-1) file of the review.
+
+                                             *agentic_review.toggle_viewed()*
+toggle_viewed()     Toggle viewed on the current file. From the diff, marking
+                    a file viewed opens the next unviewed one.
+
+                                                      *agentic_review.refs()*
+refs()              Same as |:ReviewRefs|.
+
+                                                    *agentic_review.cancel()*
+cancel()            Same as |:ReviewCancel|.
+
+                                                     *agentic_review.close()*
+close()             Same as |:ReviewClose|.
+
+==============================================================================
+9. AGENTS                                               *agentic-review-agents*
+
+claude ~
+    `claude -p` with stream-json input and output, one process per
+    conversation. Tools: Read, Grep, Glob and single `git diff`, `show`,
+    `log`, `blame` and `grep` commands, with `--permission-mode dontAsk` and
+    `--strict-mcp-config`. Claude Code hooks and CLAUDE.md files still apply.
+
+pi ~
+    `pi --mode rpc` with read, grep, find and ls, without extensions, skills
+    or MCP. It has no shell, because pi cannot limit bash to git, so each
+    message includes the diff it needs.
+
+                                                       *agentic-review-adapter*
+An adapter is a table:
+
+  cmd(ctx)          Return the argv, and optionally a session id. {ctx} has
+                    `system`, `prompt`, `session`, `root`, `label`, `model`.
+  persistent        When true the process starts once, and each prompt is
+                    written to stdin as `encode(prompt)`.
+  parse(line, emit) Turn one line of stdout into `emit.text(s)`,
+                    `emit.tool(name, input)`, `emit.session(id)` and
+                    `emit.done(err)`.
+  shell             Whether the agent can run git.
+
+Without `parse`, stdout is shown as plain text and the end of the process ends
+the answer. Register adapters under `adapters` and pick one with `agent`.
+
+==============================================================================
+10. CONFIGURATION                                      *agentic-review-config*
+
+Defaults: >lua
+    {
+      agent = "claude",
+      adapters = {},
+      model = nil,
+      files_width = 34,
+      agent_width = 0.33,
+      float_width = 100,
+      float_height = 15,
+      auto_tour = true,
+      max_context_lines = 300,
+      max_tour_lines = 1500,
+    }
+<
+  agent             adapter name, or an adapter table
+  model             passed to the agent's `--model` flag
+  files_width       width of the files panel, in columns
+  agent_width       agent pane and float split width, as a fraction
+  float_width       widest float, in columns
+  float_height      tallest float, in lines
+  auto_tour         write an overview and reading order on open
+  max_context_lines longest hunk or selection sent with an action
+  max_tour_lines    diff sent with the tour to agents without a shell
+
+ vim:tw=78:ts=8:ft=help:norl:
