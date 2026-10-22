@@ -38,7 +38,7 @@ function H.setup()
   H.repo = H.tmp .. "/repo"
   vim.env.XDG_STATE_HOME = H.tmp .. "/state"
   H.store = H.tmp .. "/state/nvim/agentic_review.json"
-  vim.o.columns, vim.o.lines = 220, 50
+  vim.o.columns, vim.o.lines = 300, 50
 
   local cart = {}
   for i = 1, 20 do
@@ -122,7 +122,7 @@ function H.fake_agent(text, opts)
   end
   events[#events + 1] = vim.json.encode(delta)
   events[#events + 1] = '{"type":"result","is_error":false}'
-  local script = "while read l; do printf '%s\\n' "
+  local script = "while read l; do case \"$l\" in *control_request*) continue ;; esac; printf '%s\\n' "
     .. table.concat(vim.tbl_map(vim.fn.shellescape, events), " ")
     .. "; done"
   return {

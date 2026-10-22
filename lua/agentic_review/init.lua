@@ -7,8 +7,11 @@ M.config = {
   agent = "claude",
   adapters = {},
   model = nil,
+  models = {},
   files_width = 34,
   agent_width = 0.33,
+  agent_height = 0.33,
+  min_diff_width = 80,
   float_width = 100,
   float_height = 15,
   auto_tour = true,
@@ -35,6 +38,7 @@ local CLAUDE_TOOLS = table.concat({
 M.adapters.claude = {
   persistent = true,
   shell = true,
+  models = { tour = "sonnet", explain = "sonnet", explore = "sonnet", deep = "opus", ask = "sonnet", review = "opus" },
   cmd = function(ctx)
     local cmd = {
       "claude",
@@ -68,6 +72,13 @@ M.adapters.claude = {
   end,
   encode = function(prompt)
     return vim.json.encode({ type = "user", message = { role = "user", content = prompt } })
+  end,
+  set_model = function(model)
+    return vim.json.encode({
+      type = "control_request",
+      request_id = "model-" .. vim.uv.hrtime(),
+      request = { subtype = "set_model", model = model },
+    })
   end,
   parse = function(line, emit)
     local ev = decode(line)
@@ -167,9 +178,53 @@ local TOUR = "Give a short overview of what this change does, in 3 to 6 sentence
   .. "read the files so the change makes sense, one line per file saying why. End with a fenced code block tagged "
   .. "review-order that lists the paths in that order, one per line."
 
+-- A single-agent take on a full PR review: passes over the change, then a confidence filter.
+local function review_prompt(shell)
+  local passes = {
+    "Read the diff, then the code each change relies on (base classes, framework types, callers) instead of "
+      .. "trusting names.",
+    "For each input that worked before the change, work out what happens now, on success and on failure.",
+    "Check lifecycle (everything the change creates or subscribes to is torn down on every path, the success "
+      .. "path included), threading (which thread runs each closure, and whether it touches UI) and data flow "
+      .. "(who sets the values the new code reads, and from which entry points).",
+    "Check coverage: which new branch has no test, and which new test cannot fail.",
+    "Read the CLAUDE.md files at the repository root and in the directories the change touches, and the "
+      .. "comments in the modified code, and check that the change follows them.",
+  }
+  if shell then
+    passes[#passes + 1] = "Read git log and git blame for the modified lines, and check that the change does "
+      .. "not undo an earlier fix."
+  end
+  local lines = { "Review this change the way a careful reviewer would before approving it, in these passes:" }
+  for i, pass in ipairs(passes) do
+    lines[#lines + 1] = ("%d. %s"):format(i, pass)
+  end
+  vim.list_extend(lines, {
+    "",
+    "Report only correctness and behaviour problems: bugs, regressions, missing teardown, guidance from a "
+      .. "CLAUDE.md or a code comment that the change breaks, and untested branches that hide one of those. Leave "
+      .. "out style, naming, readability, wording and suggestions to consider, problems on lines the change did not "
+      .. "touch or that existed before it, anything a compiler, linter or CI would catch, and changes that are "
+      .. "clearly intentional. When in doubt, leave it out.",
+    "Check each candidate against the code, rate your confidence that it is real from 0 to 100, and drop "
+      .. "anything under 80. A concern that matters but that you could not confirm in the code is a question, "
+      .. "not a bug.",
+    "Severity: high when users or data are affected on a common path, medium for a real problem on a rare path, "
+      .. "low for a real problem with small impact, question for an unconfirmed concern.",
+    "Order the findings from most to least severe. Start each one on its own line as "
+      .. "`[severity] path:line: title`, on a line the change added or modified, numbered in the new version of "
+      .. "the file (the old version for a deleted file). Below it, in two to four sentences, give the problem, a "
+      .. "concrete input or sequence that shows it, and the fix. If nothing is worth raising, say so in one line.",
+  })
+  return table.concat(lines, "\n")
+end
+
 local REF = "([%w%._%-/]+%.%w+):(%d+)"
+local FINDING = "^[%s%-%*]*%[(%a+)%]%s+`?" .. REF .. "`?:?%s*(.*)$"
 local HEADER = 3
 local STATUS_HL = { A = "Added", M = "Changed", R = "Changed", C = "Changed", T = "Changed", D = "Removed" }
+local SEVERITY_HL =
+  { high = "DiagnosticError", medium = "DiagnosticWarn", low = "DiagnosticInfo", question = "DiagnosticHint" }
 local STORE = vim.fn.stdpath("state") .. "/agentic_review.json"
 local ns = vim.api.nvim_create_namespace("agentic_review")
 local cns = vim.api.nvim_create_namespace("agentic_review_comments")
@@ -214,7 +269,7 @@ local state, agent
 local quick = {}
 
 local function reset()
-  state = { wins = {}, bufs = {}, files = {}, viewed = {}, comments = {} }
+  state = { wins = {}, bufs = {}, files = {}, viewed = {}, comments = {}, findings = {} }
   agent = conversation({ kind = "review" })
 end
 reset()
@@ -383,6 +438,7 @@ local function persist()
       return f.path
     end, state.files),
     viewed = state.viewed,
+    findings = state.findings,
   }
   write_store(store)
 end
@@ -461,7 +517,7 @@ local function status(c)
   if #c.queue > 0 then
     text = ("%s, %d queued"):format(text, #c.queue)
   end
-  text = ("%s · %s"):format(adapter_name(), text)
+  text = ("%s · %s"):format(c.model and (adapter_name() .. " · " .. c.model) or adapter_name(), text)
   if c.kind == "quick" then
     return float_status(c, text)
   end
@@ -541,11 +597,8 @@ end
 
 local function remember_session(c)
   if c.kind == "review" then
-    return persist()
+    persist()
   end
-  local store = read_store()
-  store["quick|" .. c.root] = { agent = adapter_name(), session = c.session }
-  write_store(store)
 end
 
 local finish, pump
@@ -581,7 +634,7 @@ local function spawn(c, a, prompt)
     system = c.kind == "review" and system_prompt(a) or quick_prompt(c, a),
     label = c.label,
     root = c.root,
-    model = M.config.model,
+    model = c.model,
     session = c.session,
     prompt = prompt,
   })
@@ -674,10 +727,20 @@ pump = function(c)
     c.session = nil
   end
   c.adapter = a
+  local model = M.config.models[item.action] or M.config.model or (a.models or {})[item.action]
+  local switch = a.persistent and c.job and model ~= c.model
   c.busy, c.reply, c.on_done, c.started = true, "", item.on_done, vim.uv.now()
+  c.action, c.model = item.action, model
   pane_write(c, "header", item.header)
   status(c)
   local ok, err = pcall(function()
+    if switch and model and a.set_model then
+      c.job:write(a.set_model(model) .. "\n")
+    elseif switch then
+      -- The new process resumes the same session, so only the model changes.
+      pcall(c.job.kill, c.job, 15)
+      c.job = nil
+    end
     if a.persistent then
       if not c.job then
         spawn(c, a)
@@ -692,13 +755,13 @@ pump = function(c)
   end
 end
 
-local function send(c, header, prompt, on_done)
-  table.insert(c.queue, { header = header, prompt = prompt, on_done = on_done })
+local function send(c, action, header, prompt, on_done)
+  table.insert(c.queue, { action = action, header = header, prompt = prompt, on_done = on_done })
   pump(c)
 end
 
-local function ask(header, prompt, on_done)
-  send(agent, header, prompt, on_done)
+local function ask(action, header, prompt, on_done)
+  send(agent, action, header, prompt, on_done)
 end
 
 local function stop(c)
@@ -836,7 +899,7 @@ local function diffoff()
   end
 end
 
-local function clear_comment_marks()
+local function clear_marks()
   for _, win in ipairs({ state.wins.base, state.wins.head }) do
     if win_ok(win) then
       vim.api.nvim_buf_clear_namespace(vim.api.nvim_win_get_buf(win), cns, 0, -1)
@@ -844,8 +907,16 @@ local function clear_comment_marks()
   end
 end
 
-local function mark_comments()
-  clear_comment_marks()
+local function finding_at(f, side, lnum)
+  for _, x in ipairs(state.findings) do
+    if x.path == f.path and x.line == lnum and (side == "LEFT") == (f.status == "D") then
+      return x
+    end
+  end
+end
+
+local function mark_lines()
+  clear_marks()
   local f = state.current
   for side, win in pairs({ LEFT = state.wins.base, RIGHT = state.wins.head }) do
     for _, c in ipairs(state.comments) do
@@ -858,6 +929,32 @@ local function mark_comments()
       end
     end
   end
+  local win = f and f.status == "D" and state.wins.base or state.wins.head
+  for _, x in ipairs(state.findings) do
+    if f and win_ok(win) and x.path == f.path then
+      local text = ("  [%s] %s"):format(x.severity, (x.title:gsub("`", "")):sub(1, 80))
+      pcall(vim.api.nvim_buf_set_extmark, vim.api.nvim_win_get_buf(win), cns, x.line - 1, 0, {
+        virt_text = { { text, SEVERITY_HL[x.severity] or "DiagnosticHint" } },
+        virt_text_pos = "eol",
+      })
+    end
+  end
+end
+
+-- An added or deleted file has nothing on one side, so the other side takes all the room.
+local function split_diff()
+  local wins, f = state.wins, state.current
+  if not (win_ok(wins.base) and win_ok(wins.head)) then
+    return
+  end
+  local total = vim.api.nvim_win_get_width(wins.base) + vim.api.nvim_win_get_width(wins.head)
+  local base = math.floor(total / 2)
+  if f and f.status == "A" then
+    base = 1
+  elseif f and f.status == "D" then
+    base = total - 1
+  end
+  vim.api.nvim_win_set_width(wins.base, base)
 end
 
 local function show(f)
@@ -866,7 +963,7 @@ local function show(f)
     return
   end
   state.current = f
-  clear_comment_marks()
+  clear_marks()
   diffoff()
   local old = f.old_path or f.path
   if f.binary then
@@ -899,12 +996,13 @@ local function show(f)
       pcall(vim.api.nvim_win_set_cursor, wins.head, { math.max(first.new_start, 1), 0 })
     end
   end
+  split_diff()
   render_files()
-  mark_comments()
+  mark_lines()
   if win_ok(wins.files) then
     pcall(vim.api.nvim_win_set_cursor, wins.files, { HEADER + index_of(f), 0 })
   end
-  vim.api.nvim_set_current_win(wins.head)
+  vim.api.nvim_set_current_win(f.status == "D" and wins.base or wins.head)
 end
 
 local function file_diff(f)
@@ -985,7 +1083,7 @@ local function jump()
     if not vim.uv.fs_stat(abs) then
       return notify("Not found: " .. path, vim.log.levels.WARN)
     end
-    clear_comment_marks()
+    clear_marks()
     diffoff()
     vim.api.nvim_set_current_win(state.wins.head)
     vim.cmd("edit " .. vim.fn.fnameescape(abs))
@@ -1049,7 +1147,7 @@ end
 local function follow_up(c)
   vim.ui.input({ prompt = "Follow-up: " }, function(q)
     if q and vim.trim(q) ~= "" then
-      send(c, ("## Ask\n_%s_\n"):format(q), q)
+      send(c, c.action, ("## Ask\n_%s_\n"):format(q), q)
     end
   end)
 end
@@ -1120,13 +1218,7 @@ local function quick_for(root)
   if c then
     stop(c)
   end
-  local saved = read_store()["quick|" .. root] or {}
-  c = conversation({
-    kind = "quick",
-    root = root,
-    label = "ask " .. vim.fs.basename(root),
-    session = saved.agent == adapter_name() and saved.session or nil,
-  })
+  c = conversation({ kind = "quick", root = root, label = "ask " .. vim.fs.basename(root) })
   c.buf = panel("review://ask" .. root, "markdown")
   vim.bo[c.buf].bufhidden = "hide"
   local function map(lhs, fn, desc)
@@ -1143,6 +1235,15 @@ local function quick_for(root)
   map("<C-c>", cancel, "Cancel the answer")
   quick[root] = c
   return c
+end
+
+-- A question asked from the code starts over, so neither the float nor the agent carries earlier questions.
+local function new_thread(c)
+  stop(c)
+  c.session, c.last, c.turn_start = nil, nil, nil
+  vim.bo[c.buf].modifiable = true
+  vim.api.nvim_buf_set_lines(c.buf, 0, -1, false, {})
+  vim.bo[c.buf].modifiable = false
 end
 
 -- The conversation for the current buffer: the quick buffer itself, or the repository the file belongs to.
@@ -1250,6 +1351,7 @@ local function quick_action(name, question, range)
   local a1, a2 = unpack(range or { cursor, cursor })
   local function go(title, instruction, sub)
     local c = quick_for(root)
+    new_thread(c)
     local split
     for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
       if w ~= c.float and vim.api.nvim_win_get_buf(w) == c.buf then
@@ -1261,7 +1363,7 @@ local function quick_action(name, question, range)
     else
       open_float(c, win, a1, a2, ("%s · %s"):format(title, where))
     end
-    send(c, ("## %s · `%s`\n%s"):format(title, where, sub or ""), instruction .. "\n\n" .. ctx)
+    send(c, name, ("## %s · `%s`\n%s"):format(title, where, sub or ""), instruction .. "\n\n" .. ctx)
   end
   if name == "ask" then
     if question and vim.trim(question) ~= "" then
@@ -1278,6 +1380,66 @@ local function quick_action(name, question, range)
     return notify("Unknown action: " .. name, vim.log.levels.WARN)
   end
   go(a.title, a.prompt)
+end
+
+local function arrange()
+  local wins = state.wins
+  if not (win_ok(wins.files) and win_ok(wins.agent)) then
+    return
+  end
+  local agent_w = math.floor(vim.o.columns * M.config.agent_width)
+  local stacked = (vim.o.columns - M.config.files_width - agent_w - 3) / 2 < M.config.min_diff_width
+  -- Stacked, the diff spans the full width and the files panel sits left of the agent pane along the bottom.
+  vim.api.nvim_win_call(wins.agent, function()
+    vim.cmd("wincmd " .. (stacked and "J" or "L"))
+  end)
+  if stacked then
+    vim.fn.win_splitmove(wins.files, wins.agent, { vertical = true, rightbelow = false })
+  else
+    vim.api.nvim_win_call(wins.files, function()
+      vim.cmd("wincmd H")
+    end)
+  end
+  vim.wo[wins.agent].winfixwidth = not stacked
+  vim.wo[wins.agent].winfixheight = stacked
+  vim.wo[wins.files].winfixheight = stacked
+  vim.api.nvim_win_set_width(wins.files, M.config.files_width)
+  if stacked then
+    vim.api.nvim_win_set_height(wins.agent, math.floor(vim.o.lines * M.config.agent_height))
+  else
+    vim.api.nvim_win_set_width(wins.agent, agent_w)
+  end
+  split_diff()
+  state.size = vim.o.columns .. "x" .. vim.o.lines
+end
+
+-- Comments on the finding whose heading is on or above the cursor in the agent pane.
+local function comment_finding()
+  local buf = state.bufs.agent
+  local function line_at(i)
+    return i >= 1 and vim.api.nvim_buf_get_lines(buf, i - 1, i, false)[1] or ""
+  end
+  for i = vim.api.nvim_win_get_cursor(0)[1], 1, -1 do
+    local line = line_at(i)
+    local severity, path, lnum = line:match(FINDING)
+    if severity then
+      local f = find_file(relative(path))
+      if not f then
+        return notify("Not part of this change: " .. path, vim.log.levels.WARN)
+      end
+      if f ~= state.current then
+        show(f)
+      end
+      local win = f.status == "D" and state.wins.base or state.wins.head
+      vim.api.nvim_set_current_win(win)
+      pcall(vim.api.nvim_win_set_cursor, win, { tonumber(lnum), 0 })
+      return M.comment()
+    end
+    if line:match("^## ") or (vim.trim(line) == "" and not line_at(i - 1):match(FINDING)) then
+      break
+    end
+  end
+  notify("Move the cursor to a finding to comment on it", vim.log.levels.WARN)
 end
 
 local function layout()
@@ -1303,10 +1465,7 @@ local function layout()
   vim.wo[wins.files].wrap = false
   vim.wo[wins.agent].wrap = true
   vim.wo[wins.agent].linebreak = true
-  local agent_w = math.floor(vim.o.columns * M.config.agent_width)
-  vim.api.nvim_win_set_width(wins.files, M.config.files_width)
-  vim.api.nvim_win_set_width(wins.agent, agent_w)
-  vim.api.nvim_win_set_width(wins.base, math.floor((vim.o.columns - M.config.files_width - agent_w - 3) / 2))
+  arrange()
 
   local function map(buf, lhs, fn, desc)
     vim.keymap.set("n", lhs, fn, { buffer = buf, nowait = true, desc = desc })
@@ -1316,9 +1475,13 @@ local function layout()
   end, "Open file diff")
   map(state.bufs.files, "v", M.toggle_viewed, "Toggle viewed")
   map(state.bufs.files, "t", M.tour, "Run the tour again")
+  map(state.bufs.files, "r", function()
+    M.action("review")
+  end, "Review the whole change")
   map(state.bufs.files, "q", M.close, "Close review")
   map(state.bufs.agent, "<CR>", jump, "Jump to path:line")
   map(state.bufs.agent, "gf", jump, "Jump to path:line")
+  map(state.bufs.agent, "c", comment_finding, "Comment on the finding in your pending GitHub review")
 end
 
 local function changed_files(spec)
@@ -1379,6 +1542,7 @@ local function start(spec, fresh)
     spec.root, spec.base, spec.head, spec.label, key, spec.pr
   state.files = order(spec.files, saved.order)
   state.viewed = type(saved.viewed) == "table" and saved.viewed or {}
+  state.findings = type(saved.findings) == "table" and saved.findings or {}
   agent.root, agent.label = state.root, state.label
   agent.session = saved.agent == adapter_name() and saved.session or nil
   layout()
@@ -1446,11 +1610,8 @@ function M.open(arg, fresh)
   end)
 end
 
-function M.tour()
-  if not state.tab then
-    return
-  end
-  local lines = { "Start the review. Changed files (status, path, lines added and removed):" }
+local function whole_change(intro, instruction)
+  local lines = { intro .. " Changed files (status, path, lines added and removed):" }
   for _, f in ipairs(state.files) do
     lines[#lines + 1] = file_summary(f)
   end
@@ -1464,8 +1625,42 @@ function M.tour()
     local diff = git(vim.list_extend({ "diff", "--no-color", "-M" }, diff_range())) or ""
     vim.list_extend(lines, { "", fence("diff", split_lines(diff), M.config.max_tour_lines) })
   end
-  vim.list_extend(lines, { "", TOUR })
-  ask("## Tour\n", table.concat(lines, "\n"), function(reply)
+  vim.list_extend(lines, { "", instruction })
+  return table.concat(lines, "\n")
+end
+
+-- A finding's detail is the paragraph under its heading line.
+local function parse_findings(reply)
+  local found, current = {}, nil
+  for line in (reply .. "\n"):gmatch("([^\n]*)\n") do
+    local severity, path, lnum, title = line:match(FINDING)
+    if severity then
+      current =
+        { severity = severity:lower(), path = relative(path), line = tonumber(lnum), title = title, detail = "" }
+      found[#found + 1] = current
+    elseif current and vim.trim(line) == "" then
+      current = current.detail == "" and current or nil
+    elseif current then
+      current.detail = vim.trim(current.detail .. " " .. vim.trim(line))
+    end
+  end
+  return found
+end
+
+local function review_change()
+  ask("review", "## Review\n", whole_change("Review the change below.", review_prompt(adapter().shell)), function(reply)
+    state.findings = parse_findings(reply)
+    persist()
+    mark_lines()
+    notify(("%d finding%s"):format(#state.findings, #state.findings == 1 and "" or "s"))
+  end)
+end
+
+function M.tour()
+  if not state.tab then
+    return
+  end
+  ask("tour", "## Tour\n", whole_change("Start the review.", TOUR), function(reply)
     local block = reply:match("```review%-order[^\n]*\n(.-)```")
     if block then
       state.files = order(state.files, split_lines(block))
@@ -1477,12 +1672,18 @@ end
 
 function M.action(name, question, range)
   range = range or selection()
+  if name == "review" then
+    if not in_review() then
+      return notify("Reviewing the whole change needs the review tab, see :Review", vim.log.levels.WARN)
+    end
+    return review_change()
+  end
   if not in_review() then
     return quick_action(name, question, range)
   end
   local where, ctx = context(range)
   local function send(title, instruction, sub)
-    ask(("## %s · `%s`\n%s"):format(title, where, sub or ""), instruction .. "\n\n" .. ctx)
+    ask(name, ("## %s · `%s`\n%s"):format(title, where, sub or ""), instruction .. "\n\n" .. ctx)
   end
   if name == "ask" then
     if question and vim.trim(question) ~= "" then
@@ -1607,12 +1808,15 @@ local function writes(cmd)
   return false
 end
 
-local function compose(title, lines, on_submit)
+local function compose(title, lines, on_submit, draft)
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].buftype = "acwrite"
   vim.bo[buf].bufhidden = "wipe"
   pcall(vim.api.nvim_buf_set_name, buf, "review://comment/" .. buf)
   vim.bo[buf].filetype = "markdown"
+  if draft then
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(draft, "\n", { plain = true }))
+  end
   local width, height = math.min(80, vim.o.columns - 4), math.min(12, vim.o.lines - 6)
   local win = vim.api.nvim_open_win(buf, true, {
     relative = "editor",
@@ -1682,7 +1886,9 @@ local function compose(title, lines, on_submit)
       vim.api.nvim_buf_set_lines(buf, row, row, false, block)
     end, { buffer = buf, desc = "Insert a suggestion block" })
   end
-  vim.cmd("startinsert")
+  if not draft then
+    vim.cmd("startinsert")
+  end
 end
 
 function M.comment(range)
@@ -1711,6 +1917,8 @@ function M.comment(range)
   end
   local buf = vim.api.nvim_win_get_buf(win)
   local lines, modified = vim.api.nvim_buf_get_lines(buf, l1 - 1, l2, false), vim.bo[buf].modified
+  local finding = not range and finding_at(f, side, l1)
+  local draft = finding and vim.trim(finding.title .. "\n\n" .. (finding.detail or ""))
   async(function()
     local pr = pull_request()
     if not state.head then
@@ -1749,7 +1957,7 @@ function M.comment(range)
         graphql(GH_THREAD, vars)
         table.insert(state.comments, { path = f.path, side = side, line = l2, body = body })
         render_files()
-        mark_comments()
+        mark_lines()
         notify(
           ("Added to your pending review on PR #%d. Submit it with :ReviewSubmit or at %s"):format(
             pr.number,
@@ -1757,7 +1965,7 @@ function M.comment(range)
           )
         )
       end)
-    end)
+    end, draft)
   end)
 end
 
@@ -1790,7 +1998,7 @@ function M.submit()
           local data = graphql(GH_SUBMIT, vars)
           state.comments = {}
           render_files()
-          mark_comments()
+          mark_lines()
           notify("Review submitted: " .. data.submitPullRequestReview.pullRequestReview.url)
         end)
       end)
@@ -1809,7 +2017,7 @@ function M.close()
   stop(agent)
   persist()
   save_transcript()
-  clear_comment_marks()
+  clear_marks()
   local tab = state.tab
   reset()
   if tab and vim.api.nvim_tabpage_is_valid(tab) then
@@ -1842,6 +2050,15 @@ function M.setup(opts)
     callback = function()
       if state.tab and not vim.api.nvim_tabpage_is_valid(state.tab) then
         M.close()
+      end
+    end,
+  })
+  vim.api.nvim_create_autocmd({ "VimResized", "TabEnter" }, {
+    group = group,
+    callback = function()
+      local size = vim.o.columns .. "x" .. vim.o.lines
+      if state.tab == vim.api.nvim_get_current_tabpage() and state.size ~= size then
+        arrange()
       end
     end,
   })

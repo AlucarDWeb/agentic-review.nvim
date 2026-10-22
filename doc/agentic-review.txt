@@ -49,17 +49,24 @@ has a suggested `keys` table for lazy.nvim.
 4. REVIEWING                                           *agentic-review-review*
 
 `:Review` opens a tab with four columns: the changed files, the base and head
-versions in |diff-mode|, and the agent pane. When it opens, the agent writes
-an overview and reorders the files (see `auto_tour`).
+versions in |diff-mode|, and the agent pane. When four columns would leave a
+diff pane narrower than `min_diff_width`, the diff takes the full width, with
+the files panel and the agent pane side by side under it. For an added or
+deleted file, the diff side with content takes the empty side's width. When
+it opens, the agent writes an overview and reorders the files (see
+`auto_tour`).
 
 Files panel ~
   <CR>          open the file under the cursor
   v             toggle viewed
   t             run the tour again
+  r             review the whole change
   q             close the review
 
 Agent pane ~
   <CR>, gf      jump to the path:line under the cursor
+  c             on a review finding, open its line and draft a GitHub
+                comment from it (see |agentic-review-github|)
 
 Use |]c| and |[c| to move between hunks.
 
@@ -71,13 +78,21 @@ them; `git add -N` adds them.
 ==============================================================================
 5. ASKING THE AGENT                                       *agentic-review-ask*
 
-Four actions, run with |agentic_review.action()|:
+Five actions, run with |agentic_review.action()|:
 
   explain       what the code does and why it is written that way
   explore       callers, dependencies and related code, as path:line
   deep          bugs, edge cases, lifecycle and concurrency problems and
                 missing tests, each checked against the code
   ask           your own question
+  review        the whole change, in passes: behaviour against the base,
+                lifecycle, threading, data flow, test coverage, CLAUDE.md
+                files, code comments and git history. It reports only
+                correctness and behaviour findings the agent is at least 80%
+                sure of, ranked high, medium, low or question, each at a
+                path:line. Review tab only. Findings are listed in the agent
+                pane, shown at the end of their line in the diff, and saved
+                with the review.
 
 In the review tab an action uses the hunk under the cursor, the visual
 selection, or in the files panel the whole file, and the answer streams into
@@ -86,14 +101,15 @@ the agent pane.
                                                         *agentic-review-float*
 In any other tab, the answer opens in a float under the selection, or under
 the cursor line plus 5 lines each side when nothing is selected. Near the
-bottom of the window it opens above the code. Each repository has one
-session, so follow-ups remember earlier questions.
+bottom of the window it opens above the code. Each question asked from the
+code starts a new thread with a fresh agent session, and follow-ups stay in
+that thread.
 
 Float keys ~
   a             ask a follow-up
   <CR>, gf      jump to the path:line under the cursor
-  s             move the answer to a right split; later answers stream
-                there until it is closed
+  s             move the answer to a right split; the next question
+                replaces it there until the split is closed
   <C-c>         cancel the running answer
   q, <Esc>      close
 
@@ -101,7 +117,8 @@ Float keys ~
 6. GITHUB COMMENTS                                     *agentic-review-github*
 
 |:ReviewComment| on a line or range in the diff opens a float for the
-comment.
+comment. On a line with a review finding, the float starts with the
+finding's text, ready to edit.
 
   :w, :wq, <C-s>    add the comment to your pending review
   gs                insert a `suggestion` block with the selected lines
@@ -215,6 +232,11 @@ An adapter is a table:
                     `system`, `prompt`, `session`, `root`, `label`, `model`.
   persistent        When true the process starts once, and each prompt is
                     written to stdin as `encode(prompt)`.
+  models            Default model per action: `tour`, `explain`,
+                    `explore`, `deep`, `ask` and `review`.
+  set_model(model)  Return a stdin line that switches a running persistent
+                    process to {model}. Without it, a model change restarts
+                    the process on the same session.
   parse(line, emit) Turn one line of stdout into `emit.text(s)`,
                     `emit.tool(name, input)`, `emit.session(id)` and
                     `emit.done(err)`.
@@ -231,8 +253,11 @@ Defaults: >lua
       agent = "claude",
       adapters = {},
       model = nil,
+      models = {},
       files_width = 34,
       agent_width = 0.33,
+      agent_height = 0.33,
+      min_diff_width = 80,
       float_width = 100,
       float_height = 15,
       auto_tour = true,
@@ -241,13 +266,23 @@ Defaults: >lua
     }
 <
   agent             adapter name, or an adapter table
-  model             passed to the agent's `--model` flag
+  model             model for every action not in `models`
+  models            model per action, for example `{ deep = "opus" }`
   files_width       width of the files panel, in columns
   agent_width       agent pane and float split width, as a fraction
+  agent_height      height of the files and agent panes under the diff, as
+                    a fraction
+  min_diff_width    narrowest diff pane the four columns may leave; below
+                    it the files and agent panes move under the diff
   float_width       widest float, in columns
   float_height      tallest float, in lines
   auto_tour         write an overview and reading order on open
   max_context_lines longest hunk or selection sent with an action
   max_tour_lines    diff sent with the tour to agents without a shell
+
+Each action takes its model from `models`, then `model`, then the adapter's
+defaults. The claude adapter runs `deep` and `review` on opus and the other
+actions on sonnet. The agent pane and the float show the model that is
+answering.
 
  vim:tw=78:ts=8:ft=help:norl:

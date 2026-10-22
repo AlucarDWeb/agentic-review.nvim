@@ -2,7 +2,7 @@
 
 Code review in Neovim with a headless coding agent next to the diff.
 
-Open a branch or a GitHub pull request in a review tab: the changed files in a suggested reading order, a side-by-side diff, and a pane where the agent explains, explores or digs into the hunk under the cursor. Outside a review, the same actions answer in a float under the code you select. Comments you write go to your pending GitHub review, which nobody sees until you submit it.
+Open a branch or a GitHub pull request in a review tab: the changed files in a suggested reading order, a side-by-side diff, and a pane where the agent explains, explores or digs into the hunk under the cursor, or reviews the whole change and marks its findings in the diff. Outside a review, the same actions answer in a float under the code you select. Comments you write go to your pending GitHub review, which nobody sees until you submit it.
 
 The agent runs read-only. The plugin drives [Claude Code](https://github.com/anthropics/claude-code) or [pi](https://github.com/earendil-works/pi) out of the box, and any other headless CLI through a small adapter in your config.
 
@@ -42,6 +42,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
     { "<leader>Rx", function() require("agentic_review").action("explore") end, mode = { "n", "x" }, desc = "Explore around" },
     { "<leader>Rd", function() require("agentic_review").action("deep") end, mode = { "n", "x" }, desc = "Deep dive" },
     { "<leader>Ra", function() require("agentic_review").action("ask") end, mode = { "n", "x" }, desc = "Ask" },
+    { "<leader>RR", function() require("agentic_review").action("review") end, desc = "Review the whole change" },
     { "<leader>Rf", function() require("agentic_review").answer() end, desc = "Show last answer" },
     { "<leader>Rg", function() require("agentic_review").comment() end, mode = { "n", "x" }, desc = "Comment on GitHub" },
     { "<leader>RS", "<cmd>ReviewSubmit<cr>", desc = "Submit GitHub review" },
@@ -67,11 +68,11 @@ The plugin sets no global keymaps; the table above is a suggestion. Without lazy
 | `:Review #123` | A pull request, through `gh`. It is fetched, not checked out, so the head side shows read-only revisions. If the PR is already checked out, the head side is your working tree and LSP works there |
 | `:Review!` | Any of the above, ignoring the saved session |
 
-The review opens in its own tab, from left to right: the changed files, the base and head versions in Neovim's diff mode, and the agent pane. On open the agent writes a short overview and reorders the files into a suggested reading order (`auto_tour`).
+The review opens in its own tab, from left to right: the changed files, the base and head versions in Neovim's diff mode, and the agent pane. When four columns would leave a diff pane narrower than `min_diff_width`, the diff takes the full width, with the files panel and the agent pane side by side under it. For an added or deleted file, the diff side with content takes the empty side's width. On open the agent writes a short overview and reorders the files into a suggested reading order (`auto_tour`).
 
-- Files panel: `<CR>` opens a file, `v` toggles viewed, `t` runs the tour again, `q` closes the review
+- Files panel: `<CR>` opens a file, `v` toggles viewed, `t` runs the tour again, `r` reviews the whole change, `q` closes the review
 - Diff: `]c` and `[c` move between hunks
-- Agent pane: `<CR>` or `gf` jumps to the `path:line` under the cursor
+- Agent pane: `<CR>` or `gf` jumps to the `path:line` under the cursor, `c` on a review finding drafts a GitHub comment from it
 
 The agent's session, the file order, viewed marks and the pane transcript are saved under `stdpath("state")`. Running the same `:Review` again resumes the session and skips the tour. Untracked files do not appear, because `git diff` ignores them; `git add -N <file>` makes them show up.
 
@@ -83,16 +84,19 @@ The agent's session, the file order, viewed marks and the pane transcript are sa
 | `action("explore")` | Callers, dependencies and related code, with `path:line` references |
 | `action("deep")` | Correctness bugs, edge cases, lifecycle and concurrency problems, missing tests, each checked against the code |
 | `action("ask")` | Your own question (`:ReviewAsk [question]` takes a range) |
+| `action("review")` | The whole change, in passes: behaviour against the base, lifecycle, threading, data flow, test coverage, CLAUDE.md files, code comments and git history. Only correctness and behaviour findings the agent is at least 80% sure of, ranked high, medium, low or question, each at a `path:line`. Review tab only |
+
+A review lists its findings in the agent pane, where `<CR>` jumps to each one and `c` drafts a GitHub comment from it, and shows each finding at the end of its line in the diff. The findings are saved with the review.
 
 In normal mode an action uses the hunk under the cursor, in visual mode the selection, and in the files panel the whole file. In the review tab the answer streams into the agent pane, which keeps the review conversation.
 
-Outside the review tab, in any buffer, the answer opens in a float under the selected code (or the cursor line plus 5 lines each side). It opens above the code near the bottom of the window and grows with the answer up to `float_height`. Each repository has its own session, so follow-ups remember earlier questions.
+Outside the review tab, in any buffer, the answer opens in a float under the selected code (or the cursor line plus 5 lines each side). It opens above the code near the bottom of the window and grows with the answer up to `float_height`. Each question asked from the code starts a new thread with a fresh agent session, and `a` asks a follow-up in that thread.
 
 | Key in the float | Effect |
 | --- | --- |
 | `a` | Ask a follow-up |
 | `<CR>`, `gf` | Jump to the `path:line` under the cursor |
-| `s` | Move the answer to a right split; later answers stream there until you close it |
+| `s` | Move the answer to a right split; the next question replaces it there until you close the split |
 | `<C-c>` | Cancel the running answer |
 | `q`, `<Esc>` | Close |
 
@@ -100,7 +104,7 @@ Outside the review tab, in any buffer, the answer opens in a float under the sel
 
 ## Commenting on GitHub
 
-On a line or selection in the diff, `:ReviewComment` (or `require("agentic_review").comment()`) opens a float for the comment. `:w`, `:wq` or `<C-s>` adds it to your pending review on the pull request, `gs` inserts a `suggestion` block with the selected lines, and `q` cancels. `:ReviewSubmit` submits the review as Comment, Approve or Request changes.
+On a line or selection in the diff, `:ReviewComment` (or `require("agentic_review").comment()`) opens a float for the comment. `:w`, `:wq` or `<C-s>` adds it to your pending review on the pull request, `gs` inserts a `suggestion` block with the selected lines, and `q` cancels. On a line with a review finding, the float starts with the finding's text, ready to edit. `:ReviewSubmit` submits the review as Comment, Approve or Request changes.
 
 Only a write command typed in the float sends the comment, so autosave setups that run `:wall` on `InsertLeave` or `TextChanged` do not post drafts. Before anything is sent, the plugin refuses:
 
@@ -116,7 +120,7 @@ In each of these cases the line numbers would not match GitHub. For a branch rev
 
 `pi` runs `pi --mode rpc` with `read`, `grep`, `find` and `ls`, and without extensions, skills or MCP. pi cannot limit `bash` to git commands, so it gets no shell, and each message includes the diff it needs.
 
-`model` is passed to the agent's `--model` flag.
+Each action can run on its own model, passed to the agent's `--model` flag. See [Configuration](#configuration).
 
 ### Custom adapters
 
@@ -126,6 +130,8 @@ An adapter is a table in `adapters`, picked by name with `agent`:
 | --- | --- |
 | `cmd(ctx)` | Returns the argv, and optionally a session id. `ctx` has `system`, `prompt`, `session`, `root`, `label` and `model` |
 | `persistent` | When true, the process starts once and each prompt is written to its stdin with `encode(prompt)` |
+| `models` | Default model per action (`tour`, `explain`, `explore`, `deep`, `ask`, `review`), used when `models` and `model` in your config leave it out |
+| `set_model(model)` | Returns a stdin line that switches a running persistent process to `model`. Without it, a model change restarts the process on the same session |
 | `parse(line, emit)` | Turns one stdout line into `emit.text(s)`, `emit.tool(name, input)`, `emit.session(id)` and `emit.done(err)` |
 | `shell` | Whether the agent can run git; the system prompt changes accordingly |
 
@@ -154,9 +160,12 @@ Defaults:
 {
   agent = "claude", -- adapter name, or an adapter table
   adapters = {},
-  model = nil,
+  model = nil, -- every action not in `models`
+  models = {}, -- model per action, e.g. { deep = "opus" }
   files_width = 34, -- files panel, in columns
   agent_width = 0.33, -- agent pane and the quick split, as a fraction of the screen
+  agent_height = 0.33, -- files and agent panes under the diff, as a fraction of the screen
+  min_diff_width = 80, -- narrowest diff pane before the files and agent panes move under the diff
   float_width = 100,
   float_height = 15,
   auto_tour = true, -- overview and reading order when a review opens
@@ -164,6 +173,8 @@ Defaults:
   max_tour_lines = 1500, -- diff sent with the tour to agents without a shell
 }
 ```
+
+Each action picks its model from `models`, then `model`, then the adapter's own defaults. The claude adapter runs `deep` and `review` on opus and the other actions on sonnet. The agent pane and the float show the model that is answering.
 
 ## Development
 

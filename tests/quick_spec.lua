@@ -11,11 +11,12 @@ end
 
 H.run(function()
   local rg = require("agentic_review")
-  local spawned, prompts, systems = 0, {}, {}
+  local spawned, prompts, systems, sessions = 0, {}, {}, {}
   local opts = {
     session = "q-1",
     on_spawn = function(ctx)
       spawned = spawned + 1
+      sessions[spawned] = ctx.session or false
       systems[#systems + 1] = ctx.system
     end,
     on_prompt = function(prompt)
@@ -115,6 +116,14 @@ H.run(function()
   rg.action("ask", "what about line 3?", { 3, 3 })
   H.wait_answers(qbuf, 3)
   check("answer went to split", #floats() == 0 and text(qbuf):find("what about line 3?", 1, true) ~= nil)
+
+  -- A question asked from the code drops the earlier thread, on screen and in the agent.
+  check(
+    "new question shows only itself",
+    text(qbuf):find("^## Ask") ~= nil and not text(qbuf):find("and the rounding?", 1, true),
+    text(qbuf)
+  )
+  check("new question starts a fresh session", spawned == 2 and sessions[2] == false, sessions)
   vim.api.nvim_set_current_win(split)
   vim.api.nvim_feedkeys("q", "x", false)
   check("q closes split", not vim.api.nvim_win_is_valid(split) and vim.api.nvim_get_current_win() == source)
@@ -127,7 +136,7 @@ H.run(function()
   H.wait_answers(qbuf, 4)
   check("height capped", vim.api.nvim_win_get_config(f).height == 15, vim.api.nvim_win_get_config(f).height)
   check("follows tail", vim.api.nvim_win_get_cursor(f)[1] == vim.api.nvim_buf_line_count(qbuf))
-  check("adapter switch restarted process", spawned == 2)
+  check("new question restarted process", spawned == 3)
   vim.api.nvim_feedkeys("q", "x", false)
 
   -- Near the bottom of the window the float opens above the code.
@@ -193,6 +202,5 @@ H.run(function()
   )
   H.git("stash", "pop", "-q")
 
-  local entry = H.store_entry("quick|" .. H.repo)
-  check("quick session stored", entry and entry.session == "q-1", entry)
+  check("quick session not stored", H.store_entry("quick|" .. H.repo) == nil)
 end)
