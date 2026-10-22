@@ -25,7 +25,7 @@ H.run(function()
   vim.wait(5000, function()
     return #vim.api.nvim_list_tabpages() == 2
   end)
-  local agent_win = vim.api.nvim_tabpage_list_wins(0)[4]
+  local agent_win = H.review_wins()[4]
   local pane = vim.api.nvim_win_get_buf(agent_win)
   local answers = 0
   local function run(name)

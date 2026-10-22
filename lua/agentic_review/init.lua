@@ -8,7 +8,7 @@ M.config = {
   adapters = {},
   model = nil,
   models = {},
-  files_width = 34,
+  files_height = 8,
   agent_width = 0.33,
   agent_height = 0.33,
   min_diff_width = 80,
@@ -1078,6 +1078,285 @@ local function show(f)
   vim.api.nvim_set_current_win(f.status == "D" and wins.base or wins.head)
 end
 
+local SEVERITY_RANK = { high = 4, medium = 3, low = 2, question = 1 }
+
+-- The changed files as a tree grouped by directory, filtered live by a search line drawn over its first row.
+local function pick_file()
+  if not (state.tab and #state.files > 0) then
+    return
+  end
+  local back = vim.api.nvim_get_current_win()
+  local query, selected, rows, closed = "", state.current, {}, false
+  local width = math.min(100, vim.o.columns - 8)
+  local dirs = {}
+  for _, f in ipairs(state.files) do
+    dirs[vim.fs.dirname(f.path)] = true
+  end
+  local height = math.max(3, math.min(vim.o.lines - 8, 2 + #state.files + vim.tbl_count(dirs)))
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].bufhidden = "wipe"
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = "editor",
+    row = math.floor((vim.o.lines - height) / 2) - 1,
+    col = math.floor((vim.o.columns - width) / 2),
+    width = width,
+    height = height,
+    border = "rounded",
+    style = "minimal",
+    title = " Go to file ",
+    title_pos = "left",
+    footer = " j/k move · / search · <CR> open · v viewed · q close ",
+    footer_pos = "left",
+  })
+  vim.wo[win].wrap = false
+  local prompt
+
+  local close
+  -- Leaving for any window but the list or its search line closes the picker.
+  local function leave(target)
+    vim.api.nvim_create_autocmd("WinLeave", {
+      buffer = target,
+      callback = function()
+        vim.schedule(function()
+          local cur = vim.api.nvim_get_current_win()
+          if cur ~= win and cur ~= prompt then
+            close()
+          end
+        end)
+      end,
+    })
+  end
+
+  local function findings_of(f)
+    local count, worst = 0, nil
+    for _, x in ipairs(state.findings) do
+      if x.path == f.path then
+        count = count + 1
+        if not worst or (SEVERITY_RANK[x.severity] or 0) > (SEVERITY_RANK[worst] or 0) then
+          worst = x.severity
+        end
+      end
+    end
+    return count, worst
+  end
+
+  local function render()
+    local matches = state.files
+    if query ~= "" then
+      local hits = {}
+      for _, path in
+        ipairs(vim.fn.matchfuzzy(
+          vim.tbl_map(function(f)
+            return f.path
+          end, state.files),
+          query
+        ))
+      do
+        hits[path] = true
+      end
+      matches = vim.tbl_filter(function(f)
+        return hits[f.path]
+      end, state.files)
+    end
+    local groups, order = {}, {}
+    for _, f in ipairs(matches) do
+      local dir = vim.fs.dirname(f.path)
+      if not groups[dir] then
+        groups[dir] = {}
+        order[#order + 1] = dir
+      end
+      table.insert(groups[dir], f)
+    end
+    local lines, marks = { "", ("─"):rep(width) }, {}
+    rows = {}
+    local function mark(row, s, e, group)
+      marks[#marks + 1] = { row, s, e, group }
+    end
+    for _, dir in ipairs(order) do
+      local label = dir == "." and "./" or dir .. "/"
+      if vim.fn.strdisplaywidth(label) > width - 1 then
+        label = "…" .. label:sub(-(width - 2))
+      end
+      lines[#lines + 1] = label
+      mark(#lines - 1, 0, #label, "Directory")
+      for i, f in ipairs(groups[dir]) do
+        local branch = i == #groups[dir] and "└─ " or "├─ "
+        local dot = f == state.current and "● " or (state.viewed[f.path] and "✓ " or "· ")
+        local name = vim.fs.basename(f.path)
+        local line = branch .. dot .. f.status .. " " .. name
+        lines[#lines + 1] = line
+        rows[#lines] = f
+        local row = #lines - 1
+        mark(row, 0, #branch + #dot, "NonText")
+        mark(row, #branch + #dot, #branch + #dot + 1, STATUS_HL[f.status] or "Normal")
+        if f == state.current then
+          mark(row, #line - #name, #line, "Special")
+        end
+      end
+    end
+    if not vim.tbl_contains(matches, selected) then
+      selected = matches[1]
+    end
+    vim.bo[buf].modifiable = true
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.bo[buf].modifiable = false
+    vim.api.nvim_buf_clear_namespace(buf, pns, 0, -1)
+    for _, m in ipairs(marks) do
+      vim.api.nvim_buf_set_extmark(buf, pns, m[1], m[2], { end_col = m[3], hl_group = m[4] })
+    end
+    local count = query == "" and ("%d files"):format(#state.files) or ("%d of %d"):format(#matches, #state.files)
+    vim.api.nvim_buf_set_extmark(buf, pns, 0, 0, {
+      virt_text = { { query == "" and "/ search files" or ("/ " .. query), query == "" and "Comment" or "Normal" } },
+      virt_text_pos = "overlay",
+    })
+    local tally = { virt_text = { { count, "Comment" } }, virt_text_pos = "right_align" }
+    vim.api.nvim_buf_set_extmark(buf, pns, 0, 0, tally)
+    if win_ok(prompt) then
+      vim.api.nvim_buf_set_extmark(
+        vim.api.nvim_win_get_buf(prompt),
+        pns,
+        0,
+        0,
+        vim.tbl_extend("force", tally, { id = 2 })
+      )
+    end
+    for lnum, f in pairs(rows) do
+      local stats = f.binary and "bin" or ("+%d -%d"):format(f.added or 0, f.removed or 0)
+      local chunks = {}
+      local count_f, worst = findings_of(f)
+      if count_f > 0 then
+        chunks[#chunks + 1] = { (" %d %s "):format(count_f, worst), BADGES[worst] and BADGES[worst][1] or "Comment" }
+        chunks[#chunks + 1] = { "  " }
+      end
+      chunks[#chunks + 1] = { stats, "Comment" }
+      vim.api.nvim_buf_set_extmark(buf, pns, lnum - 1, 0, { virt_text = chunks, virt_text_pos = "right_align" })
+      if f == selected then
+        vim.api.nvim_buf_set_extmark(buf, pns, lnum - 1, 0, { line_hl_group = "PmenuSel", priority = 10 })
+        pcall(vim.api.nvim_win_set_cursor, win, { lnum, 0 })
+      end
+    end
+  end
+
+  close = function()
+    if closed then
+      return
+    end
+    closed = true
+    if win_ok(prompt) then
+      pcall(vim.api.nvim_win_close, prompt, true)
+    end
+    if win_ok(win) then
+      pcall(vim.api.nvim_win_close, win, true)
+    end
+    vim.cmd("stopinsert")
+  end
+
+  local function move(delta)
+    local list = {}
+    for lnum in pairs(rows) do
+      list[#list + 1] = lnum
+    end
+    table.sort(list)
+    for i, lnum in ipairs(list) do
+      if rows[lnum] == selected then
+        selected = rows[list[math.max(1, math.min(#list, i + delta))]]
+        return render()
+      end
+    end
+  end
+
+  local function open()
+    local f = selected
+    close()
+    if f then
+      if win_ok(back) then
+        vim.api.nvim_set_current_win(back)
+      end
+      show(f)
+    end
+  end
+
+  local function search()
+    prompt = vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), true, {
+      relative = "win",
+      win = win,
+      row = 0,
+      col = 0,
+      width = width,
+      height = 1,
+      style = "minimal",
+      zindex = 60,
+    })
+    local pbuf = vim.api.nvim_win_get_buf(prompt)
+    vim.bo[pbuf].bufhidden = "wipe"
+    vim.api.nvim_buf_set_lines(pbuf, 0, -1, false, { query })
+    vim.api.nvim_buf_set_extmark(pbuf, pns, 0, 0, {
+      id = 1,
+      virt_text = { { "/ ", "Special" } },
+      virt_text_pos = "inline",
+      right_gravity = false,
+    })
+    leave(pbuf)
+    vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
+      buffer = pbuf,
+      callback = function()
+        query = vim.api.nvim_buf_get_lines(pbuf, 0, 1, false)[1] or ""
+        render()
+      end,
+    })
+    local function pmap(lhs, fn)
+      vim.keymap.set({ "i", "n" }, lhs, fn, { buffer = pbuf, nowait = true })
+    end
+    pmap("<CR>", open)
+    pmap("<Esc>", function()
+      vim.cmd("stopinsert")
+      pcall(vim.api.nvim_win_close, prompt, true)
+      prompt = nil
+      vim.api.nvim_set_current_win(win)
+    end)
+    for _, lhs in ipairs({ "<Down>", "<C-n>", "<C-j>" }) do
+      pmap(lhs, function()
+        move(1)
+      end)
+    end
+    for _, lhs in ipairs({ "<Up>", "<C-p>", "<C-k>" }) do
+      pmap(lhs, function()
+        move(-1)
+      end)
+    end
+    render()
+    vim.cmd("startinsert!")
+  end
+
+  local function map(lhs, fn)
+    vim.keymap.set("n", lhs, fn, { buffer = buf, nowait = true })
+  end
+  for _, lhs in ipairs({ "j", "<Down>", "<C-n>" }) do
+    map(lhs, function()
+      move(1)
+    end)
+  end
+  for _, lhs in ipairs({ "k", "<Up>", "<C-p>" }) do
+    map(lhs, function()
+      move(-1)
+    end)
+  end
+  map("<CR>", open)
+  map("/", search)
+  map("v", function()
+    if selected then
+      state.viewed[selected.path] = not state.viewed[selected.path] or nil
+      persist()
+      render_files()
+      render()
+    end
+  end)
+  map("q", close)
+  map("<Esc>", close)
+  leave(buf)
+  render()
+end
+
 local function file_diff(f)
   local args = vim.list_extend({ "diff", "--no-color", "-M" }, diff_range())
   vim.list_extend(args, { "--", f.path, f.old_path })
@@ -1461,22 +1740,18 @@ local function arrange()
     return
   end
   local agent_w = math.floor(vim.o.columns * M.config.agent_width)
-  local stacked = (vim.o.columns - M.config.files_width - agent_w - 3) / 2 < M.config.min_diff_width
-  -- Stacked, the diff spans the full width and the files panel sits left of the agent pane along the bottom.
+  local stacked = (vim.o.columns - agent_w - 2) / 2 < M.config.min_diff_width
+  -- J and L span the whole screen, so moving the files panel last keeps it under everything.
   vim.api.nvim_win_call(wins.agent, function()
     vim.cmd("wincmd " .. (stacked and "J" or "L"))
   end)
-  if stacked then
-    vim.fn.win_splitmove(wins.files, wins.agent, { vertical = true, rightbelow = false })
-  else
-    vim.api.nvim_win_call(wins.files, function()
-      vim.cmd("wincmd H")
-    end)
-  end
+  vim.api.nvim_win_call(wins.files, function()
+    vim.cmd("wincmd J")
+  end)
   vim.wo[wins.agent].winfixwidth = not stacked
   vim.wo[wins.agent].winfixheight = stacked
-  vim.wo[wins.files].winfixheight = stacked
-  vim.api.nvim_win_set_width(wins.files, M.config.files_width)
+  vim.wo[wins.files].winfixwidth, vim.wo[wins.files].winfixheight = false, true
+  vim.api.nvim_win_set_height(wins.files, math.min(M.config.files_height, HEADER + math.max(#state.files, 1)))
   if stacked then
     vim.api.nvim_win_set_height(wins.agent, math.floor(vim.o.lines * M.config.agent_height))
   else
@@ -1552,6 +1827,7 @@ local function layout()
     M.action("review")
   end, "Review the whole change")
   map(state.bufs.files, "q", M.close, "Close review")
+  map(state.bufs.files, "f", pick_file, "Go to a changed file")
   map(state.bufs.agent, "<CR>", jump, "Jump to path:line")
   map(state.bufs.agent, "gf", jump, "Jump to path:line")
   map(state.bufs.agent, "c", comment_finding, "Comment on the finding in your pending GitHub review")
@@ -1782,6 +2058,16 @@ function M.next(delta)
   end
   local i = index_of(state.current) or 1
   show(state.files[(i - 1 + delta) % #state.files + 1])
+end
+
+function M.files()
+  if not state.tab then
+    return notify("No review open. Start one with :Review", vim.log.levels.WARN)
+  end
+  if not in_review() then
+    vim.api.nvim_set_current_tabpage(state.tab)
+  end
+  pick_file()
 end
 
 function M.toggle_viewed()
@@ -2118,6 +2404,7 @@ function M.setup(opts)
     M.comment(o.range > 0 and { o.line1, o.line2 } or nil)
   end, { range = true, desc = "Add a comment on the line or range to your pending GitHub review" })
   cmd("ReviewSubmit", M.submit, { desc = "Submit your pending GitHub review" })
+  cmd("ReviewFiles", M.files, { desc = "Go to a changed file in the review" })
   local group = vim.api.nvim_create_augroup("agentic_review", { clear = true })
   define_highlights()
   vim.api.nvim_create_autocmd("ColorScheme", { group = group, callback = define_highlights })

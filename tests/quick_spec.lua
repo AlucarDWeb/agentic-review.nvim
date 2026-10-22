@@ -179,7 +179,7 @@ H.run(function()
   vim.wait(5000, function()
     return #vim.api.nvim_list_tabpages() == 2
   end)
-  local pane = vim.api.nvim_win_get_buf(vim.api.nvim_tabpage_list_wins(0)[4])
+  local pane = vim.api.nvim_win_get_buf(H.review_wins()[4])
   rg.action("explain")
   H.wait_answers(pane, 1)
   check("review tab uses pane", #floats() == 0 and text(pane):find("## Explain", 1, true) ~= nil)
