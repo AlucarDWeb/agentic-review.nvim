@@ -23,7 +23,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 ```lua
 {
   "AlucarDWeb/agentic-review.nvim",
-  cmd = { "Review", "ReviewClose", "ReviewCancel", "ReviewRefs", "ReviewAsk", "ReviewComment", "ReviewSubmit" },
+  cmd = { "Review", "ReviewClose", "ReviewCancel", "ReviewRefs", "ReviewAsk", "ReviewComment", "ReviewSubmit", "ReviewFiles" },
   keys = {
     { "<leader>R", "", desc = "+review" },
     { "<leader>Rr", "<cmd>Review<cr>", desc = "Review branch vs base" },
@@ -48,6 +48,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
     { "<leader>RS", "<cmd>ReviewSubmit<cr>", desc = "Submit GitHub review" },
     { "<leader>Rn", function() require("agentic_review").next(1) end, desc = "Next file" },
     { "<leader>RN", function() require("agentic_review").next(-1) end, desc = "Previous file" },
+    { "<leader>Rt", function() require("agentic_review").files() end, desc = "Go to a changed file" },
     { "<leader>Rv", function() require("agentic_review").toggle_viewed() end, desc = "Mark viewed, go to next" },
     { "<leader>Rl", "<cmd>ReviewRefs<cr>", desc = "Answer refs to quickfix" },
     { "<leader>Rc", "<cmd>ReviewCancel<cr>", desc = "Cancel agent answer" },
@@ -68,11 +69,23 @@ The plugin sets no global keymaps; the table above is a suggestion. Without lazy
 | `:Review #123` | A pull request, through `gh`. It is fetched, not checked out, so the head side shows read-only revisions. If the PR is already checked out, the head side is your working tree and LSP works there |
 | `:Review!` | Any of the above, ignoring the saved session |
 
-The review opens in its own tab, from left to right: the changed files, the base and head versions in Neovim's diff mode, and the agent pane. When four columns would leave a diff pane narrower than `min_diff_width`, the diff takes the full width, with the files panel and the agent pane side by side under it. For an added or deleted file, the diff side with content takes the empty side's width. On open the agent writes a short overview and reorders the files into a suggested reading order (`auto_tour`).
+The review opens in its own tab: the base and head versions in Neovim's diff mode with the agent pane on their right, and the changed files in a panel across the bottom. When three columns would leave a diff pane narrower than `min_diff_width`, the diff takes the full width and the agent pane moves under it, above the files. For an added or deleted file, the diff side with content takes the empty side's width. On open the agent writes a short overview and reorders the files into a suggested reading order (`auto_tour`).
 
-- Files panel: `<CR>` opens a file, `v` toggles viewed, `t` runs the tour again, `r` reviews the whole change, `q` closes the review
+- Files panel: `<CR>` opens a file, `f` goes to a file, `v` toggles viewed, `t` runs the tour again, `r` reviews the whole change, `q` closes the review
 - Diff: `]c` and `[c` move between hunks
 - Agent pane: `<CR>` or `gf` jumps to the `path:line` under the cursor, `c` on a review finding drafts a GitHub comment from it
+
+### Going to a file
+
+`:ReviewFiles`, `require("agentic_review").files()` or `f` in the files panel opens a float with the changed files as a tree grouped by directory. Each row shows the status, `●` for the open file and `✓` for viewed ones, a badge with the number of review findings and their worst severity, and the lines added and removed.
+
+| Key | Effect |
+| --- | --- |
+| `j`, `k` | Move between files |
+| `/` | Filter the files by a fuzzy match on their path, as you type. `<CR>` opens the selected match, `<Esc>` goes back to the list |
+| `<CR>` | Open the file |
+| `v` | Toggle viewed |
+| `q`, `<Esc>` | Close |
 
 The agent's session, the file order, viewed marks and the pane transcript are saved under `stdpath("state")`. Running the same `:Review` again resumes the session and skips the tour. Untracked files do not appear, because `git diff` ignores them; `git add -N <file>` makes them show up.
 
@@ -162,10 +175,10 @@ Defaults:
   adapters = {},
   model = nil, -- every action not in `models`
   models = {}, -- model per action, e.g. { deep = "opus" }
-  files_width = 34, -- files panel, in columns
+  files_height = 8, -- files panel at the bottom, in rows
   agent_width = 0.33, -- agent pane and the quick split, as a fraction of the screen
-  agent_height = 0.33, -- files and agent panes under the diff, as a fraction of the screen
-  min_diff_width = 80, -- narrowest diff pane before the files and agent panes move under the diff
+  agent_height = 0.33, -- agent pane under the diff, as a fraction of the screen
+  min_diff_width = 80, -- narrowest diff pane before the agent pane moves under the diff
   float_width = 100,
   float_height = 15,
   auto_tour = true, -- overview and reading order when a review opens

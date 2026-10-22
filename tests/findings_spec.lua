@@ -35,7 +35,7 @@ H.run(function()
   vim.wait(5000, function()
     return #vim.api.nvim_list_tabpages() == 2
   end)
-  local files, _, head, agent = unpack(vim.api.nvim_tabpage_list_wins(0))
+  local files, _, head, agent = unpack(H.review_wins())
   local pane = vim.api.nvim_win_get_buf(agent)
   local ns = vim.api.nvim_get_namespaces().agentic_review_comments
 
@@ -126,12 +126,12 @@ H.run(function()
   vim.wait(5000, function()
     return #vim.api.nvim_list_tabpages() == 2
   end)
-  files, _, head = unpack(vim.api.nvim_tabpage_list_wins(0))
+  files, _, head = unpack(H.review_wins())
   open(" cart.lua")
   check("findings restored", #marks() == 2 and marks()[2].line == 17, marks())
 
   -- r in the files panel runs the review again.
-  pane = vim.api.nvim_win_get_buf(vim.api.nvim_tabpage_list_wins(0)[4])
+  pane = vim.api.nvim_win_get_buf(H.review_wins()[4])
   local before = H.answers(pane)
   vim.api.nvim_set_current_win(files)
   vim.api.nvim_feedkeys("r", "x", false)
@@ -140,7 +140,7 @@ H.run(function()
 
   -- c on a finding's paragraph drafts a pending GitHub comment from it, at the finding's line.
   vim.env.GH_FAKE_LOG, vim.env.GH_FAKE_HEAD = H.tmp .. "/gh.log", H.head
-  local agent_win = vim.api.nvim_tabpage_list_wins(0)[4]
+  local agent_win = H.review_wins()[4]
   local function pane_cursor(fragment)
     vim.api.nvim_set_current_win(agent_win)
     for i = vim.api.nvim_buf_line_count(pane), 1, -1 do

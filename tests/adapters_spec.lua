@@ -29,7 +29,7 @@ H.run(function()
   vim.wait(5000, function()
     return #vim.api.nvim_list_tabpages() == 2
   end)
-  local wins = vim.api.nvim_tabpage_list_wins(0)
+  local wins = H.review_wins()
   local agent_buf = vim.api.nvim_win_get_buf(wins[4])
 
   rg.action("explain")

@@ -104,6 +104,22 @@ function H.floats()
   end, vim.api.nvim_tabpage_list_wins(0))
 end
 
+-- The review tab's windows as files, base, head, agent: the panels by buffer name, the diff sides in layout order.
+function H.review_wins()
+  local w = {}
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win))
+    if name == "review://files" then
+      w.files = win
+    elseif name == "review://agent" then
+      w.agent = win
+    elseif vim.api.nvim_win_get_config(win).relative == "" then
+      w[w.base and "head" or "base"] = win
+    end
+  end
+  return { w.files, w.base, w.head, w.agent }
+end
+
 function H.store_entry(key)
   return vim.json.decode(table.concat(vim.fn.readfile(H.store), "\n"))[key]
 end

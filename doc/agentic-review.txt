@@ -48,16 +48,17 @@ has a suggested `keys` table for lazy.nvim.
 ==============================================================================
 4. REVIEWING                                           *agentic-review-review*
 
-`:Review` opens a tab with four columns: the changed files, the base and head
-versions in |diff-mode|, and the agent pane. When four columns would leave a
-diff pane narrower than `min_diff_width`, the diff takes the full width, with
-the files panel and the agent pane side by side under it. For an added or
-deleted file, the diff side with content takes the empty side's width. When
-it opens, the agent writes an overview and reorders the files (see
-`auto_tour`).
+`:Review` opens a tab with the base and head versions in |diff-mode|, the
+agent pane on their right, and the changed files in a panel across the
+bottom. When three columns would leave a diff pane narrower than
+`min_diff_width`, the diff takes the full width and the agent pane moves
+under it, above the files. For an added or deleted file, the diff side with
+content takes the empty side's width. When it opens, the agent writes an
+overview and reorders the files (see `auto_tour`).
 
 Files panel ~
   <CR>          open the file under the cursor
+  f             go to a file, see |agentic-review-files|
   v             toggle viewed
   t             run the tour again
   r             review the whole change
@@ -69,6 +70,19 @@ Agent pane ~
                 comment from it (see |agentic-review-github|)
 
 Use |]c| and |[c| to move between hunks.
+
+                                                        *agentic-review-files*
+|:ReviewFiles| opens a float with the changed files as a tree grouped by
+directory. Each row shows the status, `●` for the open file and `✓` for viewed
+ones, a badge with the number of review findings and their worst severity,
+and the lines added and removed.
+
+  j, k          move between files
+  /             filter by a fuzzy match on the path as you type; <CR> opens
+                the selected match, <Esc> goes back to the list
+  <CR>          open the file
+  v             toggle viewed
+  q, <Esc>      close
 
 The session, file order, viewed marks and the pane transcript are saved in
 |stdpath()| "state". Opening the same review again resumes the session and
@@ -171,6 +185,10 @@ not match GitHub. A branch review uses the PR that `gh pr view` finds.
 :ReviewSubmit
     Submit your pending review as Comment, Approve or Request changes.
 
+                                                                *:ReviewFiles*
+:ReviewFiles
+    Go to a changed file. See |agentic-review-files|.
+
 ==============================================================================
 8. LUA FUNCTIONS                                          *agentic-review-lua*
 
@@ -183,11 +201,15 @@ open({arg}, {fresh})
 
                                                     *agentic_review.action()*
 action({name}, {question}, {range})
-                    Run "explain", "explore", "deep" or "ask". {range} is
-                    `{ first, last }`; in visual mode the selection is used.
+                    Run "explain", "explore", "deep", "ask" or "review".
+                    {range} is `{ first, last }`; in visual mode the
+                    selection is used.
 
                                                     *agentic_review.answer()*
 answer()            Reopen the last float answer for this repository.
+
+                                                     *agentic_review.files()*
+files()             Same as |:ReviewFiles|.
 
                                                    *agentic_review.comment()*
 comment({range})    Same as |:ReviewComment|.
@@ -254,7 +276,7 @@ Defaults: >lua
       adapters = {},
       model = nil,
       models = {},
-      files_width = 34,
+      files_height = 8,
       agent_width = 0.33,
       agent_height = 0.33,
       min_diff_width = 80,
@@ -268,12 +290,11 @@ Defaults: >lua
   agent             adapter name, or an adapter table
   model             model for every action not in `models`
   models            model per action, for example `{ deep = "opus" }`
-  files_width       width of the files panel, in columns
+  files_height      height of the files panel at the bottom, in rows
   agent_width       agent pane and float split width, as a fraction
-  agent_height      height of the files and agent panes under the diff, as
-                    a fraction
-  min_diff_width    narrowest diff pane the four columns may leave; below
-                    it the files and agent panes move under the diff
+  agent_height      height of the agent pane under the diff, as a fraction
+  min_diff_width    narrowest diff pane the three columns may leave; below
+                    it the agent pane moves under the diff
   float_width       widest float, in columns
   float_height      tallest float, in lines
   auto_tour         write an overview and reading order on open
