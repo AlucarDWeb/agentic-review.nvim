@@ -84,6 +84,19 @@ and the lines added and removed.
   v             toggle viewed
   q, <Esc>      close
 
+                                                       *agentic-review-images*
+A changed PNG, JPEG, GIF, BMP, WebP, TIFF, HEIC or AVIF file shows the old
+version on the base side and the new one on the head side instead of a diff.
+The images need snacks.nvim with `image.enabled` and a terminal with the kitty
+graphics protocol, such as kitty, Ghostty or WezTerm, or tmux inside one of
+them. Without them, each side shows the format, dimensions and size, and `gx`
+opens that version in your image viewer.
+
+A multiplexer that forwards kitty graphics but answers the terminal query as
+itself, such as herdr inside Ghostty, needs `SNACKS_GHOSTTY=1` (or
+`SNACKS_KITTY=1`) in the environment. Set `images = false` to turn previews
+off.
+
 The session, file order, viewed marks and the pane transcript are saved in
 |stdpath()| "state". Opening the same review again resumes the session and
 skips the tour. Untracked files are not listed, because `git diff` ignores
@@ -280,6 +293,7 @@ Defaults: >lua
       agent_width = 0.33,
       agent_height = 0.33,
       min_diff_width = 80,
+      images = true,
       float_width = 100,
       float_height = 15,
       auto_tour = true,
@@ -295,6 +309,8 @@ Defaults: >lua
   agent_height      height of the agent pane under the diff, as a fraction
   min_diff_width    narrowest diff pane the three columns may leave; below
                     it the agent pane moves under the diff
+  images            show changed images side by side, see
+                    |agentic-review-images|
   float_width       widest float, in columns
   float_height      tallest float, in lines
   auto_tour         write an overview and reading order on open
