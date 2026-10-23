@@ -12,6 +12,7 @@ M.config = {
   agent_width = 0.33,
   agent_height = 0.33,
   min_diff_width = 80,
+  images = true,
   float_width = 100,
   float_height = 15,
   auto_tour = true,
@@ -913,6 +914,92 @@ local function revision(rev, path)
   return out and split_lines(out) or {}
 end
 
+local IMAGE_FORMATS = { "png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff", "heic", "avif" }
+
+local function is_image(path)
+  return M.config.images and vim.tbl_contains(IMAGE_FORMATS, vim.fn.fnamemodify(path, ":e"):lower())
+end
+
+-- snacks.nvim's image module, when it is installed and the terminal speaks the kitty graphics protocol.
+local function snacks_image()
+  local ok, image = pcall(function()
+    return rawget(_G, "Snacks") and Snacks.image
+  end)
+  if ok and image and image.buf and image.supports_terminal and image.supports_terminal() then
+    return image
+  end
+end
+
+-- Image viewers need a real file, so a revision is written to a temporary one with the same extension.
+local function blob(rev, path)
+  local res = vim.system({ "git", "show", rev .. ":" .. path }, { cwd = state.root }):wait()
+  if res.code ~= 0 then
+    return nil
+  end
+  local file = vim.fn.tempname() .. "." .. vim.fn.fnamemodify(path, ":e")
+  local out = assert(io.open(file, "wb"))
+  out:write(res.stdout)
+  out:close()
+  return file
+end
+
+local function image_card(file)
+  local fh = assert(io.open(file, "rb"))
+  local head, size = fh:read(32) or "", fh:seek("end")
+  fh:close()
+  local function be32(i)
+    return ((head:byte(i) * 256 + head:byte(i + 1)) * 256 + head:byte(i + 2)) * 256 + head:byte(i + 3)
+  end
+  local kind, dims = vim.fn.fnamemodify(file, ":e"):upper(), nil
+  if head:sub(1, 8) == "\137PNG\r\n\26\n" and #head >= 24 then
+    kind, dims = "PNG", ("%d×%d"):format(be32(17), be32(21))
+  elseif head:sub(1, 3) == "GIF" and #head >= 10 then
+    kind, dims = "GIF", ("%d×%d"):format(head:byte(7) + head:byte(8) * 256, head:byte(9) + head:byte(10) * 256)
+  end
+  local bytes = size < 1024 and ("%d B"):format(size)
+    or size < 1048576 and ("%.1f KB"):format(size / 1024)
+    or ("%.1f MB"):format(size / 1048576)
+  local facts = dims and { kind, dims, bytes } or { kind, bytes }
+  return { table.concat(facts, " · "), "", "gx opens it in your image viewer" }
+end
+
+-- snacks.nvim sets its own window options on a window that shows an image, so code gets the old ones back.
+local function restore_window_options()
+  for win, opts in pairs(state.saved_wo or {}) do
+    if win_ok(win) then
+      for k, v in pairs(opts) do
+        vim.wo[win][k] = v
+      end
+    end
+  end
+  state.saved_wo = nil
+end
+
+local function show_image(win, name, file, path)
+  if not file then
+    return scratch(win, name, {}, path)
+  end
+  local image = snacks_image()
+  if image then
+    if not state.saved_wo then
+      state.saved_wo = {}
+      for _, w in ipairs({ state.wins.base, state.wins.head }) do
+        state.saved_wo[w] = {}
+        for k in pairs(image.config.wo or {}) do
+          state.saved_wo[w][k] = vim.wo[w][k]
+        end
+      end
+    end
+    scratch(win, name, {}, path)
+    image.buf.attach(vim.api.nvim_win_get_buf(win), { src = file })
+  else
+    scratch(win, name, image_card(file), path)
+  end
+  vim.keymap.set("n", "gx", function()
+    vim.ui.open(file)
+  end, { buffer = vim.api.nvim_win_get_buf(win), desc = "Open the image in your viewer" })
+end
+
 local function render_files()
   local buf = state.bufs.files
   if not (buf and vim.api.nvim_buf_is_valid(buf)) then
@@ -1038,8 +1125,13 @@ local function show(f)
   state.current = f
   clear_marks()
   diffoff()
+  restore_window_options()
   local old = f.old_path or f.path
-  if f.binary then
+  if is_image(f.path) then
+    show_image(wins.base, "review://base/" .. old, f.status ~= "A" and blob(state.base, old) or nil, old)
+    local head = f.status ~= "D" and (state.head and blob(state.head, f.path) or state.root .. "/" .. f.path) or nil
+    show_image(wins.head, "review://head/" .. f.path, head, f.path)
+  elseif f.binary then
     scratch(wins.base, "review://base/" .. old, { "(binary file)" }, old)
     scratch(wins.head, "review://head/" .. f.path, { "(binary file)" }, f.path)
   else

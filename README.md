@@ -87,6 +87,12 @@ The review opens in its own tab: the base and head versions in Neovim's diff mod
 | `v` | Toggle viewed |
 | `q`, `<Esc>` | Close |
 
+### Images
+
+A changed PNG, JPEG, GIF, BMP, WebP, TIFF, HEIC or AVIF file shows the old version on the base side and the new one on the head side instead of a diff. The images need [snacks.nvim](https://github.com/folke/snacks.nvim) with `image.enabled` and a terminal that speaks the kitty graphics protocol, such as kitty, Ghostty or WezTerm, or tmux running inside one of them. Without them, each side shows the format, dimensions and size, and `gx` opens that version in your image viewer.
+
+A multiplexer that forwards kitty graphics but answers the terminal query as itself, such as herdr inside Ghostty, needs `SNACKS_GHOSTTY=1` (or `SNACKS_KITTY=1`) in the environment so snacks.nvim uses the graphics protocol. `images = false` turns previews off.
+
 The agent's session, the file order, viewed marks and the pane transcript are saved under `stdpath("state")`. Running the same `:Review` again resumes the session and skips the tour. Untracked files do not appear, because `git diff` ignores them; `git add -N <file>` makes them show up.
 
 ## Asking the agent
@@ -179,6 +185,7 @@ Defaults:
   agent_width = 0.33, -- agent pane and the quick split, as a fraction of the screen
   agent_height = 0.33, -- agent pane under the diff, as a fraction of the screen
   min_diff_width = 80, -- narrowest diff pane before the agent pane moves under the diff
+  images = true, -- show changed images side by side instead of a binary file note
   float_width = 100,
   float_height = 15,
   auto_tour = true, -- overview and reading order when a review opens
