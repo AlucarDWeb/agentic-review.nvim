@@ -34,7 +34,10 @@ box, and any other headless CLI can be added as an adapter.
 - `claude` or `pi`, logged in, or a custom adapter
 - `gh`, logged in, for pull requests and comments
 
-Run `:checkhealth agentic_review` to see what is missing.
+Run `:checkhealth agentic_review` to see what is missing. Neovim only finds
+the health check once the plugin is on the 'runtimepath', so when a plugin
+manager loads it lazily, load it first (with lazy.nvim, `:Lazy load
+agentic-review.nvim`).
 
 ==============================================================================
 3. SETUP                                                *agentic-review-setup*

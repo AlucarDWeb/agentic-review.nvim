@@ -14,7 +14,7 @@ The agent runs read-only. The plugin drives [Claude Code](https://github.com/ant
 - The [GitHub CLI](https://cli.github.com) `gh`, logged in, for pull requests and comments
 - Optional: a Markdown renderer such as [render-markdown.nvim](https://github.com/MeanderingProgrammer/render-markdown.nvim) for the agent's answers
 
-Run `:checkhealth agentic_review` to see what is missing.
+Run `:checkhealth agentic_review` to see what is missing. Neovim only finds the health check once the plugin is on the runtimepath, so with the lazy-loaded spec below run `:Lazy load agentic-review.nvim` first, or any `:Review` command.
 
 ## Installation
 
