@@ -145,7 +145,16 @@ H.run(function()
   check("panel counts comment", panel_progress():find("1 pending comment$") ~= nil, panel_progress())
   local ns = vim.api.nvim_create_namespace("agentic_review_comments")
   local marks = vim.api.nvim_buf_get_extmarks(vim.api.nvim_win_get_buf(wins[2]), ns, 0, -1, { details = true })
-  check("comment mark on base line 3", #marks == 1 and marks[1][2] == 2 and marks[1][4].virt_text[1][1] == "  Why 33?")
+  local d = marks[1] and marks[1][4] or {}
+  check(
+    "comment mark on base line 3",
+    #marks == 1
+      and marks[1][2] == 2
+      and d.virt_text[1][1] == "Why 33?"
+      and d.virt_text_pos == "right_align"
+      and vim.trim(d.sign_text) == "C",
+    d
+  )
 
   -- A head side range with a suggestion block, sent with :wq, reuses the pending review.
   open_file("discount.lua")

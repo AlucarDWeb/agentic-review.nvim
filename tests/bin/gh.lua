@@ -39,6 +39,14 @@ if args[1] == "api" and args[2] == "graphql" then
     })
   end
   if query:find("addPullRequestReviewThread", 1, true) then
+    -- GH_FAKE_REFUSE_LINE stands for a line that is in the local diff but not in GitHub's.
+    local refuse = os.getenv("GH_FAKE_REFUSE_LINE")
+    for i = 1, #args - 1 do
+      if refuse and args[i] == "-F" and args[i + 1] == "line=" .. refuse then
+        io.stderr:write("gh: Line could not be resolved\n")
+        os.exit(1)
+      end
+    end
     reply({ data = { addPullRequestReviewThread = { thread = { id = "T1" } } } })
   end
   if query:find("addPullRequestReview(", 1, true) then
