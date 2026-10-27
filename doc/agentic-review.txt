@@ -65,12 +65,14 @@ Files panel ~
   v             toggle viewed
   t             run the tour again
   r             review the whole change
+  C             add every finding to your pending GitHub review
   q             close the review
 
 Agent pane ~
   <CR>, gf      jump to the path:line under the cursor
-  c             on a review finding, open its line and draft a GitHub
-                comment from it (see |agentic-review-github|)
+  c             on a finding, open its line and draft a GitHub comment
+                from it (see |agentic-review-github|)
+  C             add every finding to your pending GitHub review
 
 Use |]c| and |[c| to move between hunks.
 
@@ -113,16 +115,23 @@ Five actions, run with |agentic_review.action()|:
   explain       what the code does and why it is written that way
   explore       callers, dependencies and related code, as path:line
   deep          bugs, edge cases, lifecycle and concurrency problems and
-                missing tests, each checked against the code
+                missing tests, each checked against the code. Problems and
+                open questions come back as findings, like a review's.
   ask           your own question
   review        the whole change, in passes: behaviour against the base,
                 lifecycle, threading, data flow, test coverage, CLAUDE.md
                 files, code comments and git history. It reports only
                 correctness and behaviour findings the agent is at least 80%
                 sure of, ranked high, medium, low or question, each at a
-                path:line. Review tab only. Findings are listed in the agent
-                pane, shown at the end of their line in the diff, and saved
-                with the review.
+                path:line. Review tab only.
+
+                                                     *agentic-review-findings*
+Findings from a review or a deep dive are listed in the agent pane and shown
+at the right edge of their line in the diff, with the severity in the sign
+column: `H`, `M`, `L` or `?`. The files panel counts the findings not yet on
+GitHub. A new review replaces the previous review's findings that are not on
+GitHub yet; a deep dive adds to the list, skipping lines that already have a
+finding. Findings are saved with the review.
 
 In the review tab an action uses the hunk under the cursor, the visual
 selection, or in the files panel the whole file, and the answer streams into
@@ -147,8 +156,8 @@ Float keys ~
 6. GITHUB COMMENTS                                     *agentic-review-github*
 
 |:ReviewComment| on a line or range in the diff opens a float for the
-comment. On a line with a review finding, the float starts with the
-finding's text, ready to edit.
+comment. On a line with a finding, the float starts with the finding's text,
+ready to edit.
 
   :w, :wq, <C-s>    add the comment to your pending review
   gs                insert a `suggestion` block with the selected lines
@@ -158,10 +167,18 @@ Only a write command typed in the float sends the comment, so an autosave
 that runs |:wall| on |InsertLeave| or |TextChanged| does not post drafts.
 |:ReviewSubmit| submits the pending review.
 
+|:ReviewCommentAll| adds every finding not yet on GitHub to the pending
+review, as the agent wrote it. A finding whose line is outside every hunk, or
+that GitHub refuses, goes in as a comment on the whole file that starts with
+`Line <n>:`, and so does |:ReviewComment| on such a line. A finding is sent
+once. One that the checks below refuse stays for the next run and is listed
+in the notification.
+
 The comment is refused before anything is sent when the lines are outside a
-hunk, when the local HEAD is not the PR head, or when a head side comment is
-on a file with unpushed or unsaved changes, because the line numbers would
-not match GitHub. A branch review uses the PR that `gh pr view` finds.
+hunk and carry no finding, when the local HEAD is not the PR head, or when a
+head side comment is on a file with unpushed or unsaved changes, because the
+line numbers would not match GitHub. A branch review uses the PR that
+`gh pr view` finds.
 
 ==============================================================================
 7. COMMANDS                                          *agentic-review-commands*
@@ -197,6 +214,11 @@ not match GitHub. A branch review uses the PR that `gh pr view` finds.
 :[range]ReviewComment
     Write a GitHub comment on the line or range. See |agentic-review-github|.
 
+                                                           *:ReviewCommentAll*
+:ReviewCommentAll
+    Add every finding not yet on GitHub to your pending review. See
+    |agentic-review-github|.
+
                                                                *:ReviewSubmit*
 :ReviewSubmit
     Submit your pending review as Comment, Approve or Request changes.
@@ -229,6 +251,9 @@ files()             Same as |:ReviewFiles|.
 
                                                    *agentic_review.comment()*
 comment({range})    Same as |:ReviewComment|.
+
+                                               *agentic_review.comment_all()*
+comment_all()       Same as |:ReviewCommentAll|.
 
                                                     *agentic_review.submit()*
 submit()            Same as |:ReviewSubmit|.

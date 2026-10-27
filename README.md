@@ -23,7 +23,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 ```lua
 {
   "AlucarDWeb/agentic-review.nvim",
-  cmd = { "Review", "ReviewClose", "ReviewCancel", "ReviewRefs", "ReviewAsk", "ReviewComment", "ReviewSubmit", "ReviewFiles" },
+  cmd = { "Review", "ReviewClose", "ReviewCancel", "ReviewRefs", "ReviewAsk", "ReviewComment", "ReviewCommentAll", "ReviewSubmit", "ReviewFiles" },
   keys = {
     { "<leader>R", "", desc = "+review" },
     { "<leader>Rr", "<cmd>Review<cr>", desc = "Review branch vs base" },
@@ -45,6 +45,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
     { "<leader>RR", function() require("agentic_review").action("review") end, desc = "Review the whole change" },
     { "<leader>Rf", function() require("agentic_review").answer() end, desc = "Show last answer" },
     { "<leader>Rg", function() require("agentic_review").comment() end, mode = { "n", "x" }, desc = "Comment on GitHub" },
+    { "<leader>RG", "<cmd>ReviewCommentAll<cr>", desc = "Send every finding to GitHub" },
     { "<leader>RS", "<cmd>ReviewSubmit<cr>", desc = "Submit GitHub review" },
     { "<leader>Rn", function() require("agentic_review").next(1) end, desc = "Next file" },
     { "<leader>RN", function() require("agentic_review").next(-1) end, desc = "Previous file" },
@@ -71,9 +72,9 @@ The plugin sets no global keymaps; the table above is a suggestion. Without lazy
 
 The review opens in its own tab: the base and head versions in Neovim's diff mode with the agent pane on their right, and the changed files in a panel across the bottom. When three columns would leave a diff pane narrower than `min_diff_width`, the diff takes the full width and the agent pane moves under it, above the files. For an added or deleted file, the diff side with content takes the empty side's width. On open the agent writes a short overview and reorders the files into a suggested reading order (`auto_tour`).
 
-- Files panel: `<CR>` opens a file, `f` goes to a file, `v` toggles viewed, `t` runs the tour again, `r` reviews the whole change, `q` closes the review
+- Files panel: `<CR>` opens a file, `f` goes to a file, `v` toggles viewed, `t` runs the tour again, `r` reviews the whole change, `C` adds every finding to your pending GitHub review, `q` closes the review
 - Diff: `]c` and `[c` move between hunks
-- Agent pane: `<CR>` or `gf` jumps to the `path:line` under the cursor, `c` on a review finding drafts a GitHub comment from it
+- Agent pane: `<CR>` or `gf` jumps to the `path:line` under the cursor, `c` on a finding drafts a GitHub comment from it, `C` adds every finding to your pending GitHub review
 
 ### Going to a file
 
@@ -101,11 +102,11 @@ The agent's session, the file order, viewed marks and the pane transcript are sa
 | --- | --- |
 | `action("explain")` | What the code does and why it is written that way |
 | `action("explore")` | Callers, dependencies and related code, with `path:line` references |
-| `action("deep")` | Correctness bugs, edge cases, lifecycle and concurrency problems, missing tests, each checked against the code |
+| `action("deep")` | Correctness bugs, edge cases, lifecycle and concurrency problems, missing tests, each checked against the code. Problems and open questions come back as findings, like a review's |
 | `action("ask")` | Your own question (`:ReviewAsk [question]` takes a range) |
 | `action("review")` | The whole change, in passes: behaviour against the base, lifecycle, threading, data flow, test coverage, CLAUDE.md files, code comments and git history. Only correctness and behaviour findings the agent is at least 80% sure of, ranked high, medium, low or question, each at a `path:line`. Review tab only |
 
-A review lists its findings in the agent pane, where `<CR>` jumps to each one and `c` drafts a GitHub comment from it, and shows each finding at the end of its line in the diff. The findings are saved with the review.
+A review or a deep dive lists its findings in the agent pane, where `<CR>` jumps to each one and `c` drafts a GitHub comment from it. The diff shows each finding at the right edge of its line, with its severity in the sign column (`H`, `M`, `L` or `?`), and the files panel counts the findings not yet on GitHub. A new review replaces the previous review's findings that are not on GitHub yet; a deep dive adds to the list, skipping lines that already have a finding. The findings are saved with the review.
 
 In normal mode an action uses the hunk under the cursor, in visual mode the selection, and in the files panel the whole file. In the review tab the answer streams into the agent pane, which keeps the review conversation.
 
@@ -123,11 +124,13 @@ Outside the review tab, in any buffer, the answer opens in a float under the sel
 
 ## Commenting on GitHub
 
-On a line or selection in the diff, `:ReviewComment` (or `require("agentic_review").comment()`) opens a float for the comment. `:w`, `:wq` or `<C-s>` adds it to your pending review on the pull request, `gs` inserts a `suggestion` block with the selected lines, and `q` cancels. On a line with a review finding, the float starts with the finding's text, ready to edit. `:ReviewSubmit` submits the review as Comment, Approve or Request changes.
+On a line or selection in the diff, `:ReviewComment` (or `require("agentic_review").comment()`) opens a float for the comment. `:w`, `:wq` or `<C-s>` adds it to your pending review on the pull request, `gs` inserts a `suggestion` block with the selected lines, and `q` cancels. On a line with a finding, the float starts with the finding's text, ready to edit. `:ReviewSubmit` submits the review as Comment, Approve or Request changes.
+
+`:ReviewCommentAll` (or `C` in the files panel or the agent pane) adds every finding not yet on GitHub to your pending review, as written by the agent. A finding whose line is outside every hunk, or that GitHub refuses, goes in as a comment on the whole file that starts with `Line <n>:`. The same applies to `:ReviewComment` on such a line. Each finding is sent once: one already on GitHub is skipped on the next run, and a finding the checks below refuse stays for the next run, listed in the notification.
 
 Only a write command typed in the float sends the comment, so autosave setups that run `:wall` on `InsertLeave` or `TextChanged` do not post drafts. Before anything is sent, the plugin refuses:
 
-- lines outside a hunk, which GitHub does not accept
+- lines outside a hunk that carry no finding, which GitHub does not accept
 - a local `HEAD` that differs from the PR head
 - head side comments on a file with unpushed or unsaved changes
 

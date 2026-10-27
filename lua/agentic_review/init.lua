@@ -157,6 +157,19 @@ M.adapters.pi = {
   end,
 }
 
+local SEVERITY = "Severity: high when users or data are affected on a common path, medium for a real problem on a "
+  .. "rare path, low for a real problem with small impact, question for an unconfirmed concern."
+
+-- The plugin parses findings in this shape into the diff and sends them to GitHub as comments.
+local function finding_format(where)
+  return "Start each finding on its own line as `[severity] path:line: title`, with the full path from the "
+    .. "repository root, on "
+    .. where
+    .. ", numbered in the new version of the file (the old version for a deleted file). Below it, in two to four "
+    .. "sentences, give the problem, a concrete input or sequence that shows it, and the fix. Leave no blank line "
+    .. "inside a finding."
+end
+
 local ACTIONS = {
   explain = {
     title = "Explain",
@@ -169,9 +182,13 @@ local ACTIONS = {
   },
   deep = {
     title = "Deep dive",
-    prompt = "Go deep on this change. Look for correctness bugs, edge cases, lifecycle and concurrency problems, "
-      .. "error handling gaps and missing tests. Read the surrounding code to check each claim, and mark anything "
-      .. "you could not verify.",
+    prompt = table.concat({
+      "Go deep on this change. Look for correctness bugs, edge cases, lifecycle and concurrency problems, error "
+        .. "handling gaps and missing tests. Read the surrounding code to check each claim.",
+      "Write each problem you confirm, and each concern you could not confirm as a question, as a finding. "
+        .. SEVERITY,
+      finding_format("the line of the change it concerns"),
+    }, "\n"),
   },
 }
 
@@ -210,18 +227,15 @@ local function review_prompt(shell)
     "Check each candidate against the code, rate your confidence that it is real from 0 to 100, and drop "
       .. "anything under 80. A concern that matters but that you could not confirm in the code is a question, "
       .. "not a bug.",
-    "Severity: high when users or data are affected on a common path, medium for a real problem on a rare path, "
-      .. "low for a real problem with small impact, question for an unconfirmed concern.",
-    "Order the findings from most to least severe. Start each one on its own line as "
-      .. "`[severity] path:line: title`, on a line the change added or modified, numbered in the new version of "
-      .. "the file (the old version for a deleted file). Below it, in two to four sentences, give the problem, a "
-      .. "concrete input or sequence that shows it, and the fix. If nothing is worth raising, say so in one line.",
+    SEVERITY,
+    "Order the findings from most to least severe. "
+      .. finding_format("a line the change added or modified")
+      .. " If nothing is worth raising, say so in one line.",
   })
   return table.concat(lines, "\n")
 end
 
 local REF = "([%w%._%-/]+%.%w+):(%d+)"
-local FINDING = "^[%s%-%*]*%[(%a+)%]%s+`?" .. REF .. "`?:?%s*(.*)$"
 local HEADER = 3
 local STATUS_HL = { A = "Added", M = "Changed", R = "Changed", C = "Changed", T = "Changed", D = "Removed" }
 local SEVERITY_HL =
@@ -236,6 +250,22 @@ local BADGES = {
   low = { "AgenticReviewLow", "DiagnosticInfo" },
   question = { "AgenticReviewQuestion", "DiagnosticHint" },
 }
+local SIGNS = { high = "H", medium = "M", low = "L", question = "?" }
+
+-- Reads a `[severity] path:line: title` heading through the list markers, heading marks, bold and backticks
+-- that agents wrap it in.
+local function finding_of(line)
+  local s = line:gsub("^[%s>#]*", ""):gsub("^%d+[%.%)]%s+", ""):gsub("^[%-%*%+%s]*", "")
+  local severity, rest = s:match("^%[(%a+)%][%*_:]*%s+(.*)$")
+  local path, lnum, title = (rest or ""):match("^[%*`]*" .. REF .. "[%*`]*(.*)$")
+  if not path then
+    return
+  end
+  -- A range such as path:12-15 keeps its first line.
+  title = title:gsub("^%-%d+[%*`]*", ""):gsub("^%s*:?%s*", "")
+  title = title:gsub("^\226\128[\147\148]%s*", ""):gsub("^%-%s+", ""):gsub("%s*%*+$", "")
+  return severity, path, lnum, title
+end
 
 -- Severity tags are badges in the theme's diagnostic colours; the other groups are plain links.
 local function define_highlights()
@@ -285,7 +315,7 @@ local function paint(buf, first, last)
     elseif line:match("^_error: .*_$") then
       hl(row, 0, #line, "AgenticReviewError")
     else
-      local severity = line:match(FINDING)
+      local severity = finding_of(line)
       local badge = severity and BADGES[severity:lower()]
       if badge then
         local s, e = line:find("%[%a+%]")
@@ -319,10 +349,10 @@ mutation($pr: ID!, $commit: GitObjectID!) {
 }]]
 
 local GH_THREAD = [[
-mutation($review: ID!, $path: String!, $line: Int!, $side: DiffSide!, $startLine: Int, $startSide: DiffSide,
-  $body: String!) {
+mutation($review: ID!, $path: String!, $line: Int, $side: DiffSide, $startLine: Int, $startSide: DiffSide,
+  $subjectType: PullRequestReviewThreadSubjectType, $body: String!) {
   addPullRequestReviewThread(input: {pullRequestReviewId: $review, path: $path, line: $line, side: $side,
-    startLine: $startLine, startSide: $startSide, body: $body}) { thread { id } }
+    startLine: $startLine, startSide: $startSide, subjectType: $subjectType, body: $body}) { thread { id } }
 }]]
 
 local GH_SUBMIT = [[
@@ -448,6 +478,25 @@ local function find_file(path)
       return f
     end
   end
+end
+
+-- The changed file a path from the agent names: as written, without a ./, a/ or b/ prefix, or by a unique suffix
+-- such as a bare file name.
+local function resolve(path)
+  path = relative(path)
+  local f = find_file(path) or find_file((path:gsub("^%./", ""))) or find_file((path:gsub("^[ab]/", "")))
+  if f then
+    return f
+  end
+  for _, x in ipairs(state.files) do
+    if x.path:sub(-#path - 1) == "/" .. path then
+      if f then
+        return nil
+      end
+      f = x
+    end
+  end
+  return f
 end
 
 local function next_unviewed(from)
@@ -854,16 +903,9 @@ local function buf_text(buf)
   return table.concat(lines, "\n") .. "\n"
 end
 
-local function hunks()
-  local base = vim.api.nvim_win_get_buf(state.wins.base)
-  local head = vim.api.nvim_win_get_buf(state.wins.head)
-  local diff = (vim.text and vim.text.diff or vim.diff)(
-    buf_text(base),
-    buf_text(head),
-    { ctxlen = 3, algorithm = "histogram" }
-  )
+local function parse_hunks(diff)
   local list, cur = {}, nil
-  for _, line in ipairs(vim.split(diff or "", "\n", { plain = true })) do
+  for _, line in ipairs(diff) do
     local os, oc, hs, hc = line:match("^@@ %-(%d+),?(%d*) %+(%d+),?(%d*) @@")
     if os then
       cur = {
@@ -879,6 +921,28 @@ local function hunks()
     end
   end
   return list
+end
+
+local function hunks()
+  local base = vim.api.nvim_win_get_buf(state.wins.base)
+  local head = vim.api.nvim_win_get_buf(state.wins.head)
+  local diff = (vim.text and vim.text.diff or vim.diff)(
+    buf_text(base),
+    buf_text(head),
+    { ctxlen = 3, algorithm = "histogram" }
+  )
+  return parse_hunks(vim.split(diff or "", "\n", { plain = true }))
+end
+
+local function in_hunk(list, side, l1, l2)
+  for _, h in ipairs(list) do
+    local s = side == "LEFT" and h.old_start or h.new_start
+    local e = s + (side == "LEFT" and h.old_count or h.new_count) - 1
+    if l1 >= s and l2 <= e then
+      return true
+    end
+  end
+  return false
 end
 
 local function hunk_at(side, lnum)
@@ -1012,6 +1076,12 @@ local function render_files()
     end
   end
   local progress = ("%d/%d viewed"):format(viewed, #state.files)
+  local unsent = #vim.tbl_filter(function(x)
+    return not x.posted
+  end, state.findings)
+  if unsent > 0 then
+    progress = ("%s · %d finding%s"):format(progress, unsent, unsent == 1 and "" or "s")
+  end
   if #state.comments > 0 then
     progress = ("%s · %d pending comment%s"):format(progress, #state.comments, #state.comments == 1 and "" or "s")
   end
@@ -1069,10 +1139,25 @@ end
 
 local function finding_at(f, side, lnum)
   for _, x in ipairs(state.findings) do
-    if x.path == f.path and x.line == lnum and (side == "LEFT") == (f.status == "D") then
+    if x.path == f.path and x.line == lnum and not x.posted and (side == "LEFT") == (f.status == "D") then
       return x
     end
   end
+end
+
+-- Diff windows do not wrap, so a mark goes at the right edge and in the sign column, where a long line cannot
+-- push it off screen.
+local function mark(win, lnum, text, hl, sign)
+  local max = math.max(10, math.floor(vim.api.nvim_win_get_width(win) / 2))
+  if vim.fn.strdisplaywidth(text) > max then
+    text = vim.fn.strcharpart(text, 0, max - 1) .. "…"
+  end
+  pcall(vim.api.nvim_buf_set_extmark, vim.api.nvim_win_get_buf(win), cns, lnum - 1, 0, {
+    virt_text = { { text, hl } },
+    virt_text_pos = "right_align",
+    sign_text = sign,
+    sign_hl_group = hl,
+  })
 end
 
 local function mark_lines()
@@ -1081,22 +1166,15 @@ local function mark_lines()
   for side, win in pairs({ LEFT = state.wins.base, RIGHT = state.wins.head }) do
     for _, c in ipairs(state.comments) do
       if f and win_ok(win) and c.path == f.path and c.side == side then
-        local text = "  " .. c.body:match("^[^\n]*"):sub(1, 60)
-        pcall(vim.api.nvim_buf_set_extmark, vim.api.nvim_win_get_buf(win), cns, c.line - 1, 0, {
-          virt_text = { { text, "DiagnosticHint" } },
-          virt_text_pos = "eol",
-        })
+        mark(win, c.line, c.body:match("^[^\n]*"), "DiagnosticHint", "C")
       end
     end
   end
   local win = f and f.status == "D" and state.wins.base or state.wins.head
   for _, x in ipairs(state.findings) do
-    if f and win_ok(win) and x.path == f.path then
-      local text = ("  [%s] %s"):format(x.severity, (x.title:gsub("`", "")):sub(1, 80))
-      pcall(vim.api.nvim_buf_set_extmark, vim.api.nvim_win_get_buf(win), cns, x.line - 1, 0, {
-        virt_text = { { text, SEVERITY_HL[x.severity] or "DiagnosticHint" } },
-        virt_text_pos = "eol",
-      })
+    if f and win_ok(win) and x.path == f.path and not x.posted then
+      local hl = SEVERITY_HL[x.severity] or "DiagnosticHint"
+      mark(win, x.line, ("[%s] %s"):format(x.severity, (x.title:gsub("`", ""))), hl, SIGNS[x.severity] or "?")
     end
   end
 end
@@ -1222,7 +1300,7 @@ local function pick_file()
   local function findings_of(f)
     local count, worst = 0, nil
     for _, x in ipairs(state.findings) do
-      if x.path == f.path then
+      if x.path == f.path and not x.posted then
         count = count + 1
         if not worst or (SEVERITY_RANK[x.severity] or 0) > (SEVERITY_RANK[worst] or 0) then
           worst = x.severity
@@ -1861,9 +1939,9 @@ local function comment_finding()
   end
   for i = vim.api.nvim_win_get_cursor(0)[1], 1, -1 do
     local line = line_at(i)
-    local severity, path, lnum = line:match(FINDING)
+    local severity, path, lnum = finding_of(line)
     if severity then
-      local f = find_file(relative(path))
+      local f = resolve(path)
       if not f then
         return notify("Not part of this change: " .. path, vim.log.levels.WARN)
       end
@@ -1875,7 +1953,7 @@ local function comment_finding()
       pcall(vim.api.nvim_win_set_cursor, win, { tonumber(lnum), 0 })
       return M.comment()
     end
-    if line:match("^## ") or (vim.trim(line) == "" and not line_at(i - 1):match(FINDING)) then
+    if line:match("^## ") or (vim.trim(line) == "" and not finding_of(line_at(i - 1))) then
       break
     end
   end
@@ -1923,6 +2001,9 @@ local function layout()
   map(state.bufs.agent, "<CR>", jump, "Jump to path:line")
   map(state.bufs.agent, "gf", jump, "Jump to path:line")
   map(state.bufs.agent, "c", comment_finding, "Comment on the finding in your pending GitHub review")
+  for _, buf in ipairs({ state.bufs.files, state.bufs.agent }) do
+    map(buf, "C", M.comment_all, "Add every finding to your pending GitHub review")
+  end
 end
 
 local function changed_files(spec)
@@ -2071,31 +2152,71 @@ local function whole_change(intro, instruction)
   return table.concat(lines, "\n")
 end
 
--- A finding's detail is the paragraph under its heading line.
+-- A finding's detail is the paragraph under its heading line, line breaks kept. Findings on files outside the
+-- change are only counted, since the diff cannot show them and GitHub cannot take them.
 local function parse_findings(reply)
-  local found, current = {}, nil
+  local found, outside, current = {}, 0, nil
   for line in (reply .. "\n"):gmatch("([^\n]*)\n") do
-    local severity, path, lnum, title = line:match(FINDING)
-    if severity then
-      current =
-        { severity = severity:lower(), path = relative(path), line = tonumber(lnum), title = title, detail = "" }
+    local severity, path, lnum, title = finding_of(line)
+    local f = severity and resolve(path)
+    if severity and not f then
+      outside, current = outside + 1, nil
+    elseif severity then
+      current = { severity = severity:lower(), path = f.path, line = tonumber(lnum), title = title, detail = "" }
       found[#found + 1] = current
-    elseif current and vim.trim(line) == "" then
-      current = current.detail == "" and current or nil
+    elseif current and (vim.trim(line) == "" or line:match("^#")) then
+      current = current.detail == "" and vim.trim(line) == "" and current or nil
     elseif current then
-      current.detail = vim.trim(current.detail .. " " .. vim.trim(line))
+      line = line:gsub("%s+$", "")
+      current.detail = current.detail == "" and vim.trim(line) or (current.detail .. "\n" .. line)
     end
   end
-  return found
+  return found, outside
+end
+
+-- A review replaces the earlier review's findings that are not on GitHub yet. Deep dives add to the list, and
+-- nothing is added twice on the same line.
+local function add_findings(found, source)
+  local list = vim.tbl_filter(function(x)
+    return x.posted or source ~= "review" or (x.source or "review") ~= "review"
+  end, state.findings)
+  local taken, added = {}, 0
+  for _, x in ipairs(list) do
+    taken[x.path .. ":" .. x.line] = true
+  end
+  for _, x in ipairs(found) do
+    local id = x.path .. ":" .. x.line
+    if not taken[id] then
+      taken[id], x.source, added = true, source, added + 1
+      list[#list + 1] = x
+    end
+  end
+  state.findings = list
+  persist()
+  render_files()
+  mark_lines()
+  return added
+end
+
+local function plural(n, word)
+  return ("%d %s%s"):format(n, word, n == 1 and "" or "s")
 end
 
 local function review_change()
   ask("review", "## Review\n", whole_change("Review the change below.", review_prompt(adapter().shell)), function(reply)
-    state.findings = parse_findings(reply)
-    persist()
-    mark_lines()
-    notify(("%d finding%s"):format(#state.findings, #state.findings == 1 and "" or "s"))
+    local found, outside = parse_findings(reply)
+    add_findings(found, "review")
+    notify(plural(#found, "finding") .. (outside > 0 and (", %d outside the change"):format(outside) or ""))
   end)
+end
+
+local function deep_findings(reply)
+  local found, outside = parse_findings(reply)
+  local added = add_findings(found, "deep")
+  if added > 0 or outside > 0 then
+    local note = ("%s from the deep dive"):format(plural(added, "new finding"))
+    notify(note .. (outside > 0 and (", %d outside the change"):format(outside) or ""))
+  end
 end
 
 function M.tour()
@@ -2125,7 +2246,8 @@ function M.action(name, question, range)
   end
   local where, ctx = context(range)
   local function send(title, instruction, sub)
-    ask(name, ("## %s · `%s`\n%s"):format(title, where, sub or ""), instruction .. "\n\n" .. ctx)
+    local on_done = name == "deep" and deep_findings or nil
+    ask(name, ("## %s · `%s`\n%s"):format(title, where, sub or ""), instruction .. "\n\n" .. ctx, on_done)
   end
   if name == "ask" then
     if question and vim.trim(question) ~= "" then
@@ -2248,6 +2370,61 @@ local function pending_review(pr)
   return nil, node.id
 end
 
+local function review_of(pr)
+  local review, pr_id = pending_review(pr)
+  return review
+    or graphql(GH_START, { pr = pr_id, commit = state.head or pr.head }).addPullRequestReview.pullRequestReview
+end
+
+-- Without l1 the thread is on the whole file.
+local function add_thread(review, path, side, l1, l2, body)
+  local vars = { review = review.id, path = path, body = body }
+  if l1 then
+    vars.line, vars.side = l2, side
+    if l1 ~= l2 then
+      vars.startLine, vars.startSide = l1, side
+    end
+  else
+    vars.subjectType = "FILE"
+  end
+  graphql(GH_THREAD, vars)
+end
+
+-- Line numbers match GitHub only when the local HEAD is the PR head and the head side has no local changes.
+local function check_head(pr)
+  if state.head then
+    return
+  end
+  local head = run({ "git", "rev-parse", "HEAD" }, state.root)
+  if head ~= pr.head then
+    error(
+      ("Local HEAD %s is not the PR head %s. Push or pull first so line numbers match GitHub."):format(
+        head:sub(1, 8),
+        pr.head:sub(1, 8)
+      ),
+      0
+    )
+  end
+end
+
+local function check_clean(path, side)
+  if state.head or side ~= "RIGHT" then
+    return
+  end
+  local abs, modified = state.root .. "/" .. path, false
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    modified = modified or (vim.api.nvim_buf_get_name(buf) == abs and vim.bo[buf].modified)
+  end
+  if modified or not pcall(run, { "git", "diff", "--quiet", "HEAD", "--", path }, state.root) then
+    error(path .. " has changes that are not in the PR, so line numbers would not match GitHub. Push first.", 0)
+  end
+end
+
+local function finding_body(x, whole_file)
+  local body = vim.trim(x.title .. "\n\n" .. (x.detail or ""))
+  return whole_file and ("Line %d: %s"):format(x.line, body) or body
+end
+
 -- Ex commands that write the current buffer, with the shortest abbreviation Vim accepts for each.
 local WRITE_CMDS = { write = 1, wq = 2, xit = 1, exit = 3, update = 2, wall = 2, wqall = 3, xall = 2 }
 
@@ -2355,59 +2532,41 @@ function M.comment(range)
   local side = win == state.wins.base and "LEFT" or "RIGHT"
   local cursor = vim.api.nvim_win_get_cursor(win)[1]
   local l1, l2 = unpack(range or { cursor, cursor })
-  local inside = false
-  for _, h in ipairs(hunks()) do
-    local s = side == "LEFT" and h.old_start or h.new_start
-    local e = s + (side == "LEFT" and h.old_count or h.new_count) - 1
-    inside = inside or (l1 >= s and l2 <= e)
-  end
-  if not inside then
+  local finding = not range and finding_at(f, side, l1)
+  -- GitHub takes a finding outside every hunk as a comment on the whole file.
+  local whole_file = not in_hunk(hunks(), side, l1, l2)
+  if whole_file and not finding then
     return notify(
       ("Lines %d-%d are outside the diff, and GitHub only takes comments inside a hunk"):format(l1, l2),
       vim.log.levels.WARN
     )
   end
-  local buf = vim.api.nvim_win_get_buf(win)
-  local lines, modified = vim.api.nvim_buf_get_lines(buf, l1 - 1, l2, false), vim.bo[buf].modified
-  local finding = not range and finding_at(f, side, l1)
-  local draft = finding and vim.trim(finding.title .. "\n\n" .. (finding.detail or ""))
+  local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(win), l1 - 1, l2, false)
   async(function()
     local pr = pull_request()
-    if not state.head then
-      local head = run({ "git", "rev-parse", "HEAD" }, state.root)
-      if head ~= pr.head then
-        error(
-          ("Local HEAD %s is not the PR head %s. Push or pull first so line numbers match GitHub."):format(
-            head:sub(1, 8),
-            pr.head:sub(1, 8)
-          ),
-          0
-        )
-      end
-      if
-        side == "RIGHT"
-        and (modified or not pcall(run, { "git", "diff", "--quiet", "HEAD", "--", f.path }, state.root))
-      then
-        error(f.path .. " has changes that are not in the PR, so line numbers would not match GitHub. Push first.", 0)
-      end
-    end
+    check_head(pr)
+    check_clean(f.path, side)
     local where = ("%s:%s%s"):format(f.path, l1 == l2 and l1 or (l1 .. "-" .. l2), side == "LEFT" and " (base)" or "")
-    compose(("PR #%d · %s"):format(pr.number, where), side == "RIGHT" and lines or nil, function(body)
+    if whole_file then
+      where = where .. " · file comment, the line is outside the diff"
+    end
+    local suggest = side == "RIGHT" and not whole_file and lines or nil
+    compose(("PR #%d · %s"):format(pr.number, where), suggest, function(body)
       async(function()
         if not state.tab then
           return notify("The review was closed, so the comment was not added", vim.log.levels.WARN)
         end
-        local review, pr_id = pending_review(pr)
-        if not review then
-          review =
-            graphql(GH_START, { pr = pr_id, commit = state.head or pr.head }).addPullRequestReview.pullRequestReview
+        local review = review_of(pr)
+        if whole_file then
+          add_thread(review, f.path, side, nil, nil, body)
+        else
+          add_thread(review, f.path, side, l1, l2, body)
         end
-        local vars = { review = review.id, path = f.path, line = l2, side = side, body = body }
-        if l1 ~= l2 then
-          vars.startLine, vars.startSide = l1, side
-        end
-        graphql(GH_THREAD, vars)
         table.insert(state.comments, { path = f.path, side = side, line = l2, body = body })
+        if finding then
+          finding.posted = true
+          persist()
+        end
         render_files()
         mark_lines()
         notify(
@@ -2417,7 +2576,83 @@ function M.comment(range)
           )
         )
       end)
-    end, draft)
+    end, finding and finding_body(finding, whole_file))
+  end)
+end
+
+function M.comment_all()
+  if not state.tab then
+    return notify("No review open. Start one with :Review", vim.log.levels.WARN)
+  end
+  if state.posting then
+    return notify("Still adding findings to your pending review")
+  end
+  local todo = vim.tbl_filter(function(x)
+    return not x.posted
+  end, state.findings)
+  if #todo == 0 then
+    return notify("No findings to add. Review the change with r in the files panel, or run a deep dive")
+  end
+  local s, key = state, state.key
+  s.posting = true
+  async(function()
+    local ok, err = pcall(function()
+      local pr = pull_request()
+      check_head(pr)
+      local review, diffs, sent, whole, failed = nil, {}, 0, 0, {}
+      for _, x in ipairs(todo) do
+        if state.key ~= key then
+          return
+        end
+        local f = find_file(x.path)
+        local side = f and f.status == "D" and "LEFT" or "RIGHT"
+        local done, res = pcall(function()
+          if not f then
+            error("not part of this change", 0)
+          end
+          check_clean(f.path, side)
+          diffs[f] = diffs[f] or parse_hunks(file_diff(f))
+          review = review or review_of(pr)
+          local body = finding_body(x)
+          -- GitHub can still refuse a line that its own diff leaves out, which also ends in a file comment.
+          if
+            in_hunk(diffs[f], side, x.line, x.line) and pcall(add_thread, review, f.path, side, x.line, x.line, body)
+          then
+            return body
+          end
+          body = finding_body(x, true)
+          add_thread(review, f.path, side, nil, nil, body)
+          whole = whole + 1
+          return body
+        end)
+        if done then
+          x.posted, sent = true, sent + 1
+          table.insert(state.comments, { path = x.path, side = side, line = x.line, body = res })
+        else
+          failed[#failed + 1] = ("%s:%d: %s"):format(x.path, x.line, res)
+        end
+      end
+      persist()
+      render_files()
+      mark_lines()
+      local notes = {}
+      if sent > 0 then
+        notes[1] = ("Added %s to your pending review on PR #%d%s. Submit it with :ReviewSubmit or at %s"):format(
+          plural(sent, "finding"),
+          pr.number,
+          whole > 0 and (", %d as a file comment because the line is outside the diff"):format(whole) or "",
+          review.url
+        )
+      end
+      if #failed > 0 then
+        notes[#notes + 1] = ("%s not added:\n%s"):format(plural(#failed, "finding"), table.concat(failed, "\n"))
+      end
+      notify(table.concat(notes, "\n"), #failed > 0 and vim.log.levels.WARN or nil)
+    end)
+    s.posting = nil
+    if not ok then
+      error(err, 0)
+    end
   end)
 end
 
@@ -2495,6 +2730,7 @@ function M.setup(opts)
   cmd("ReviewComment", function(o)
     M.comment(o.range > 0 and { o.line1, o.line2 } or nil)
   end, { range = true, desc = "Add a comment on the line or range to your pending GitHub review" })
+  cmd("ReviewCommentAll", M.comment_all, { desc = "Add every finding to your pending GitHub review" })
   cmd("ReviewSubmit", M.submit, { desc = "Submit your pending GitHub review" })
   cmd("ReviewFiles", M.files, { desc = "Go to a changed file in the review" })
   local group = vim.api.nvim_create_augroup("agentic_review", { clear = true })
