@@ -48,6 +48,9 @@ if args[1] == "api" and args[2] == "graphql" then
       data = { viewer = { login = "me" }, repository = { pullRequest = { id = "PR_7", reviews = { nodes = nodes } } } },
     })
   end
+  if query:find("addPullRequestReviewThreadReply", 1, true) then
+    reply({ data = { addPullRequestReviewThreadReply = { comment = { id = "C1" } } } })
+  end
   if query:find("addPullRequestReviewThread", 1, true) then
     -- GH_FAKE_REFUSE_LINE stands for a line that is in the local diff but not in GitHub's.
     local refuse = os.getenv("GH_FAKE_REFUSE_LINE")

@@ -367,10 +367,16 @@ query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
       reviewThreads(first: 100) {
-        nodes { isResolved path line diffSide comments(first: 50) { nodes { author { login } body } } }
+        nodes { id isResolved path line diffSide comments(first: 50) { nodes { author { login } body state } } }
       }
     }
   }
+}]]
+
+local GH_REPLY = [[
+mutation($thread: ID!, $review: ID!, $body: String!) {
+  addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $thread, pullRequestReviewId: $review,
+    body: $body}) { comment { id } }
 }]]
 
 -- A conversation owns one agent process and the buffer its answers stream into. The review has one, and
@@ -1075,6 +1081,10 @@ local function show_image(win, name, file, path)
   end, { buffer = vim.api.nvim_win_get_buf(win), desc = "Open the image in your viewer" })
 end
 
+local function plural(n, word)
+  return ("%d %s%s"):format(n, word, n == 1 and "" or "s")
+end
+
 local function render_files()
   local buf = state.bufs.files
   if not (buf and vim.api.nvim_buf_is_valid(buf)) then
@@ -1351,6 +1361,12 @@ local function pick_file()
     return count, worst
   end
 
+  local function threads_of(f)
+    return #vim.tbl_filter(function(t)
+      return t.path == f.path
+    end, state.threads)
+  end
+
   local function render()
     local matches = state.files
     if query ~= "" then
@@ -1437,6 +1453,11 @@ local function pick_file()
       local count_f, worst = findings_of(f)
       if count_f > 0 then
         chunks[#chunks + 1] = { (" %d %s "):format(count_f, worst), BADGES[worst] and BADGES[worst][1] or "Comment" }
+        chunks[#chunks + 1] = { "  " }
+      end
+      local threads = threads_of(f)
+      if threads > 0 then
+        chunks[#chunks + 1] = { plural(threads, "thread"), "DiagnosticHint" }
         chunks[#chunks + 1] = { "  " }
       end
       chunks[#chunks + 1] = { stats, "Comment" }
@@ -2242,10 +2263,6 @@ local function add_findings(found, source)
   return added
 end
 
-local function plural(n, word)
-  return ("%d %s%s"):format(n, word, n == 1 and "" or "s")
-end
-
 local function review_change()
   ask("review", "## Review\n", whole_change("Review the change below.", review_prompt(adapter().shell)), function(reply)
     local found, outside = parse_findings(reply)
@@ -2406,6 +2423,7 @@ end
 local function pending_review(pr)
   local data = graphql(GH_PENDING, { owner = pr.owner, repo = pr.repo, number = pr.number })
   local node = data.repository.pullRequest
+  pr.viewer = data.viewer.login
   for _, review in ipairs(node.reviews.nodes) do
     if review.author and review.author.login == data.viewer.login then
       return review, node.id
@@ -2490,71 +2508,16 @@ load_threads = function()
     local list = {}
     for _, t in ipairs(data.repository.pullRequest.reviewThreads.nodes) do
       local comments = vim.tbl_map(function(c)
-        return { author = c.author and c.author.login or "ghost", body = c.body or "" }
+        return { author = c.author and c.author.login or "ghost", body = c.body or "", pending = c.state == "PENDING" }
       end, t.comments.nodes)
       if t.line and not t.isResolved and #comments > 0 then
-        list[#list + 1] = { path = t.path, side = t.diffSide, line = t.line, comments = comments }
+        list[#list + 1] = { id = t.id, path = t.path, side = t.diffSide, line = t.line, comments = comments }
       end
     end
     state.threads = list
     render_files()
     mark_lines()
   end)
-end
-
-function M.thread()
-  if not state.tab then
-    return notify("No review open. Start one with :Review", vim.log.levels.WARN)
-  end
-  local win, f = vim.api.nvim_get_current_win(), state.current
-  if not f or (win ~= state.wins.base and win ~= state.wins.head) then
-    return notify("Move the cursor to a line in the diff to read its comments", vim.log.levels.WARN)
-  end
-  local side = win == state.wins.base and "LEFT" or "RIGHT"
-  local lnum = vim.api.nvim_win_get_cursor(win)[1]
-  local lines = {}
-  for _, t in ipairs(state.threads) do
-    if t.path == f.path and t.side == side and t.line == lnum then
-      if #lines > 0 then
-        vim.list_extend(lines, { "", "---", "" })
-      end
-      for i, c in ipairs(t.comments) do
-        if i > 1 then
-          lines[#lines + 1] = ""
-        end
-        lines[#lines + 1] = "**" .. c.author .. "**"
-        vim.list_extend(lines, vim.split((c.body:gsub("\r", "")), "\n", { plain = true }))
-      end
-    end
-  end
-  if #lines == 0 then
-    return notify(("No open GitHub comments on line %d"):format(lnum))
-  end
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[buf].bufhidden = "wipe"
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.bo[buf].modifiable = false
-  vim.bo[buf].filetype = "markdown"
-  local float = vim.api.nvim_open_win(buf, true, {
-    relative = "cursor",
-    row = 1,
-    col = 0,
-    width = math.max(20, math.min(M.config.float_width, vim.o.columns - 4)),
-    height = 1,
-    border = "rounded",
-    title = (" %s:%d "):format(f.path, lnum),
-    title_pos = "left",
-    footer = " q close ",
-    footer_pos = "right",
-  })
-  vim.wo[float].wrap, vim.wo[float].linebreak = true, true
-  local needed = vim.api.nvim_win_text_height(float, {}).all
-  vim.api.nvim_win_set_config(float, { height = math.max(1, math.min(M.config.float_height, needed)) })
-  for _, lhs in ipairs({ "q", "<Esc>" }) do
-    vim.keymap.set("n", lhs, function()
-      pcall(vim.api.nvim_win_close, float, true)
-    end, { buffer = buf, nowait = true, desc = "Close" })
-  end
 end
 
 -- Ex commands that write the current buffer, with the shortest abbreviation Vim accepts for each.
@@ -2650,6 +2613,99 @@ local function compose(title, lines, on_submit, draft)
   if not draft then
     vim.cmd("startinsert")
   end
+end
+
+local function reply(t)
+  async(function()
+    local pr = pull_request()
+    local where = ("%s:%d%s"):format(t.path, t.line, t.side == "LEFT" and " (base)" or "")
+    compose(("PR #%d · reply on %s"):format(pr.number, where), nil, function(body)
+      async(function()
+        if not state.tab then
+          return notify("The review was closed, so the reply was not added", vim.log.levels.WARN)
+        end
+        local review = review_of(pr)
+        graphql(GH_REPLY, { thread = t.id, review = review.id, body = body })
+        table.insert(t.comments, { author = pr.viewer, body = body, pending = true })
+        table.insert(state.comments, { path = t.path, side = t.side, line = t.line, body = body })
+        render_files()
+        mark_lines()
+        notify(
+          ("Reply added to your pending review on PR #%d. Submit it with :ReviewSubmit or at %s"):format(
+            pr.number,
+            review.url
+          )
+        )
+      end)
+    end)
+  end)
+end
+
+function M.thread()
+  if not state.tab then
+    return notify("No review open. Start one with :Review", vim.log.levels.WARN)
+  end
+  local win, f = vim.api.nvim_get_current_win(), state.current
+  if not f or (win ~= state.wins.base and win ~= state.wins.head) then
+    return notify("Move the cursor to a line in the diff to read its comments", vim.log.levels.WARN)
+  end
+  local side = win == state.wins.base and "LEFT" or "RIGHT"
+  local lnum = vim.api.nvim_win_get_cursor(win)[1]
+  local lines, starts = {}, {}
+  for _, t in ipairs(state.threads) do
+    if t.path == f.path and t.side == side and t.line == lnum then
+      if #lines > 0 then
+        vim.list_extend(lines, { "", "---", "" })
+      end
+      starts[#starts + 1] = { row = #lines + 1, thread = t }
+      for i, c in ipairs(t.comments) do
+        if i > 1 then
+          lines[#lines + 1] = ""
+        end
+        lines[#lines + 1] = "**" .. c.author .. "**" .. (c.pending and " · pending" or "")
+        vim.list_extend(lines, vim.split((c.body:gsub("\r", "")), "\n", { plain = true }))
+      end
+    end
+  end
+  if #lines == 0 then
+    return notify(("No open GitHub comments on line %d"):format(lnum))
+  end
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].bufhidden = "wipe"
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+  vim.bo[buf].filetype = "markdown"
+  local float = vim.api.nvim_open_win(buf, true, {
+    relative = "cursor",
+    row = 1,
+    col = 0,
+    width = math.max(20, math.min(M.config.float_width, vim.o.columns - 4)),
+    height = 1,
+    border = "rounded",
+    title = (" %s:%d "):format(f.path, lnum),
+    title_pos = "left",
+    footer = " r reply · q close ",
+    footer_pos = "right",
+  })
+  vim.wo[float].wrap, vim.wo[float].linebreak = true, true
+  local needed = vim.api.nvim_win_text_height(float, {}).all
+  vim.api.nvim_win_set_config(float, { height = math.max(1, math.min(M.config.float_height, needed)) })
+  for _, lhs in ipairs({ "q", "<Esc>" }) do
+    vim.keymap.set("n", lhs, function()
+      pcall(vim.api.nvim_win_close, float, true)
+    end, { buffer = buf, nowait = true, desc = "Close" })
+  end
+  -- With several threads on the line, the reply goes to the one under the cursor.
+  vim.keymap.set("n", "r", function()
+    local row, t = vim.api.nvim_win_get_cursor(float)[1], starts[1].thread
+    for _, s in ipairs(starts) do
+      if s.row <= row then
+        t = s.thread
+      end
+    end
+    pcall(vim.api.nvim_win_close, float, true)
+    reply(t)
+  end, { buffer = buf, nowait = true, desc = "Reply in your pending review" })
 end
 
 function M.comment(range)

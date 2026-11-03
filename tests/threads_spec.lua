@@ -8,6 +8,7 @@ vim.env.GH_FAKE_THREADS = H.tmp .. "/threads.json"
 
 local function thread(path, line, side, resolved, comments)
   return {
+    id = ("PRRT_%s_%s"):format(path, tostring(line)),
     isResolved = resolved,
     path = path,
     line = line or vim.NIL,
@@ -103,6 +104,73 @@ H.run(function()
   vim.api.nvim_win_set_cursor(head, { 1, 0 })
   rg.thread()
   check("line without threads", last_note() == "No open GitHub comments on line 1", last_note())
+
+  -- The go-to-file picker counts each file's open threads.
+  rg.files()
+  local picker = H.floats()[1]
+  local pbuf = picker and vim.api.nvim_win_get_buf(picker)
+  local function right_text(fragment)
+    local pns = vim.api.nvim_get_namespaces().agentic_review_pane
+    for i, l in ipairs(lines(pbuf)) do
+      if l:find(fragment, 1, true) then
+        local out = {}
+        for _, m in ipairs(vim.api.nvim_buf_get_extmarks(pbuf, pns, { i - 1, 0 }, { i - 1, -1 }, { details = true })) do
+          if m[4].virt_text_pos == "right_align" then
+            for _, chunk in ipairs(m[4].virt_text) do
+              out[#out + 1] = chunk[1]
+            end
+          end
+        end
+        return table.concat(out)
+      end
+    end
+    return ""
+  end
+  check("picker counts threads", right_text(" cart.lua"):find("^2 threads  ") ~= nil, right_text(" cart.lua"))
+  check("picker skips outdated threads", not right_text(" discount.lua"):find("thread"), right_text(" discount.lua"))
+  vim.api.nvim_feedkeys("q", "x", false)
+
+  -- r in the thread float replies to that thread in the pending review.
+  vim.api.nvim_set_current_win(head)
+  vim.api.nvim_win_set_cursor(head, { 17, 0 })
+  vim.cmd("ReviewThread")
+  vim.api.nvim_feedkeys("r", "x", false)
+  vim.wait(3000, function()
+    local w = H.floats()[1]
+    return w and vim.api.nvim_win_get_config(w).title[1][1]:find("reply on src/cart.lua:17", 1, true) ~= nil
+  end)
+  vim.api.nvim_buf_set_lines(vim.api.nvim_win_get_buf(H.floats()[1]), 0, -1, false, { "Fixed in the next commit" })
+  vim.api.nvim_feedkeys(vim.keycode("<Esc>"), "xt", false)
+  vim.api.nvim_feedkeys(vim.keycode(":write<CR>"), "xt", false)
+  local replied = vim.wait(5000, function()
+    return last_note():find("Reply added to your pending review", 1, true) ~= nil
+  end)
+  check("reply added", replied, H.notes)
+  local call = vim.tbl_filter(function(l)
+    return l:find("addPullRequestReviewThreadReply", 1, true) ~= nil
+  end, vim.fn.readfile(vim.env.GH_FAKE_LOG))[1] or ""
+  check(
+    "reply goes to the thread and the pending review",
+    call:find("thread=PRRT_src/cart.lua_17", 1, true)
+      and call:find("review=PRR_1", 1, true)
+      and call:find("body=Fixed in the next commit", 1, true),
+    call
+  )
+  check(
+    "reply counted on the mark",
+    vim.deep_equal(marks(head), { { line = 17, text = "alice: Why apply_discount here? +2", sign = "C" } }),
+    marks(head)
+  )
+  vim.api.nvim_set_current_win(head)
+  vim.cmd("ReviewThread")
+  float = H.floats()[1]
+  body = float and lines(vim.api.nvim_win_get_buf(float)) or {}
+  check(
+    "reply in the float",
+    vim.deep_equal(vim.list_slice(body, 8), { "", "**me** · pending", "Fixed in the next commit" }),
+    body
+  )
+  vim.api.nvim_feedkeys("q", "x", false)
 
   -- A comment this session added that GitHub already lists is drawn once.
   vim.api.nvim_set_current_win(base)
