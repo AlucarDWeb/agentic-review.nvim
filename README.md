@@ -1,24 +1,23 @@
 # agentic-review.nvim
 
-Code review in Neovim with a headless coding agent next to the diff.
-
-Open a branch or a GitHub pull request in a review tab: the changed files in a suggested reading order, a side-by-side diff, and a pane where the agent explains, explores or digs into the hunk under the cursor, or reviews the whole change and marks its findings in the diff. Outside a review, the same actions answer in a float under the code you select. Comments you write go to your pending GitHub review, which nobody sees until you submit it.
-
-The agent runs read-only. The plugin drives [Claude Code](https://github.com/anthropics/claude-code) or [pi](https://github.com/earendil-works/pi) out of the box, and any other headless CLI through a small adapter in your config.
+Code review in Neovim with a read-only coding agent next to the diff, on a branch or a GitHub pull request. Details are in `:help agentic-review.txt`.
 
 ## Requirements
 
-- Neovim 0.10 or newer
-- git
-- An agent CLI: `claude` (Claude Code) or `pi`, logged in, or your own adapter
-- The [GitHub CLI](https://cli.github.com) `gh`, logged in, for pull requests and comments
-- Optional: a Markdown renderer such as [render-markdown.nvim](https://github.com/MeanderingProgrammer/render-markdown.nvim) for the agent's answers
+| Tool | Needed for |
+| --- | --- |
+| Neovim 0.10 or newer | |
+| git | |
+| `claude` ([Claude Code](https://github.com/anthropics/claude-code)) or `pi` ([pi](https://github.com/earendil-works/pi)), logged in | The agent, unless you write your own adapter |
+| [`gh`](https://cli.github.com), logged in | Pull requests and GitHub comments |
+| [snacks.nvim](https://github.com/folke/snacks.nvim) (optional) | Image previews |
+| [render-markdown.nvim](https://github.com/MeanderingProgrammer/render-markdown.nvim) (optional) | Rendered answers |
 
-Run `:checkhealth agentic_review` to see what is missing. Neovim only finds the health check once the plugin is on the runtimepath, so with the lazy-loaded spec below run `:Lazy load agentic-review.nvim` first, or any `:Review` command.
+`:checkhealth agentic_review` lists what is missing. With lazy.nvim, run `:Lazy load agentic-review.nvim` first.
 
 ## Installation
 
-With [lazy.nvim](https://github.com/folke/lazy.nvim):
+[lazy.nvim](https://github.com/folke/lazy.nvim), with suggested keymaps (the plugin sets none):
 
 ```lua
 {
@@ -61,144 +60,77 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 }
 ```
 
-The plugin sets no global keymaps; the table above is a suggestion. `version = "*"` keeps lazy.nvim on tagged releases.
-
-### Other plugin managers
-
-Neovim 0.12 has a built-in plugin manager:
+Neovim 0.12, built-in `vim.pack`:
 
 ```lua
 vim.pack.add({ { src = "https://github.com/AlucarDWeb/agentic-review.nvim", version = vim.version.range("*") } })
 require("agentic_review").setup({})
 ```
 
-On Neovim 0.10 and 0.11, clone the latest release tag into a package directory:
+Neovim 0.10 and 0.11, a package directory, then `require("agentic_review").setup({})` in your `init.lua`:
 
 ```sh
 git clone --depth 1 --branch v0.1.0 https://github.com/AlucarDWeb/agentic-review.nvim \
   ~/.local/share/nvim/site/pack/plugins/start/agentic-review.nvim
 ```
 
-Then call `require("agentic_review").setup({})` once in your `init.lua`.
+## Commands
 
-## Reviewing a branch or a pull request
-
-| Command | What it reviews |
+| Command | What it does |
 | --- | --- |
-| `:Review` | The current branch against its merge-base with `origin/HEAD` (falling back to `origin/main`, `origin/master`, `main`, `master`), uncommitted changes included |
-| `:Review <ref>` | The same, against another base: `:Review origin/develop`, or `:Review HEAD` for uncommitted changes only |
-| `:Review #123` | A pull request, through `gh`. It is fetched, not checked out, so the head side shows read-only revisions. If the PR is already checked out, the head side is your working tree and LSP works there |
+| `:Review` | Review the current branch against its merge-base with `origin/HEAD`, uncommitted changes included |
+| `:Review <ref>` | Review against another base, such as `origin/develop`, or `HEAD` for uncommitted changes only |
+| `:Review #123` | Review a pull request, fetched through `gh` |
 | `:Review!` | Any of the above, ignoring the saved session |
+| `:ReviewAsk [question]` | Ask the agent about the range |
+| `:ReviewFiles` | Go to a changed file |
+| `:ReviewComment` | Comment on the line or range, in your pending GitHub review |
+| `:ReviewCommentAll` | Add every finding not yet on GitHub to your pending review |
+| `:ReviewThread` | Read the open GitHub threads on the line, and reply to them |
+| `:ReviewSubmit` | Submit your review as Comment, Approve or Request changes |
+| `:ReviewRefs` | Send every `path:line` in the last answer to the quickfix list |
+| `:ReviewCancel` | Cancel the running answer |
+| `:ReviewClose` | Close the review |
 
-The review opens in its own tab: the base and head versions in Neovim's diff mode with the agent pane on their right, and the changed files in a panel across the bottom. When three columns would leave a diff pane narrower than `min_diff_width`, the diff takes the full width and the agent pane moves under it, above the files. For an added or deleted file, the diff side with content takes the empty side's width. On open the agent writes a short overview and reorders the files into a suggested reading order (`auto_tour`).
+## Agent actions
 
-- Files panel: `<CR>` opens a file, `f` goes to a file, `v` toggles viewed, `t` runs the tour again, `r` reviews the whole change, `C` adds every finding to your pending GitHub review, `S` submits your GitHub review, `q` closes the review
-- Diff: `]c` and `[c` move between hunks
-- Agent pane: `<CR>` or `gf` jumps to the `path:line` under the cursor, `c` on a finding drafts a GitHub comment from it, `C` adds every finding to your pending GitHub review, `S` submits your GitHub review
+`require("agentic_review").action(name)` works on the hunk under the cursor, the visual selection, or the whole file from the files panel. In the review tab the answer goes to the agent pane, elsewhere to a float under the code.
 
-### Going to a file
-
-`:ReviewFiles`, `require("agentic_review").files()` or `f` in the files panel opens a float with the changed files as a tree grouped by directory. Each row shows the status, `●` for the open file and `✓` for viewed ones, a badge with the number of review findings and their worst severity, the number of open GitHub threads, and the lines added and removed.
-
-| Key | Effect |
+| Action | What the agent does |
 | --- | --- |
-| `j`, `k` | Move between files |
-| `/` | Filter the files by a fuzzy match on their path, as you type. `<CR>` opens the selected match, `<Esc>` goes back to the list |
-| `<CR>` | Open the file |
-| `v` | Toggle viewed |
-| `q`, `<Esc>` | Close |
+| `explain` | Explains what the code does and why |
+| `explore` | Finds callers, dependencies and related code, with `path:line` references |
+| `deep` | Looks for bugs, edge cases and missing tests, and lists them as findings |
+| `ask` | Answers your question |
+| `review` | Reviews the whole change and marks each finding at its line (review tab only) |
 
-### Images
+## Keys
 
-A changed PNG, JPEG, GIF, BMP, WebP, TIFF, HEIC or AVIF file shows the old version on the base side and the new one on the head side instead of a diff. The images need [snacks.nvim](https://github.com/folke/snacks.nvim) with `image.enabled` and a terminal that speaks the kitty graphics protocol, such as kitty, Ghostty or WezTerm, or tmux running inside one of them. Without them, each side shows the format, dimensions and size, and `gx` opens that version in your image viewer.
-
-A multiplexer that forwards kitty graphics but answers the terminal query as itself, such as herdr inside Ghostty, needs `SNACKS_GHOSTTY=1` (or `SNACKS_KITTY=1`) in the environment so snacks.nvim uses the graphics protocol. `images = false` turns previews off.
-
-The agent's session, the file order, viewed marks and the pane transcript are saved under `stdpath("state")`. Running the same `:Review` again resumes the session and skips the tour. Untracked files do not appear, because `git diff` ignores them; `git add -N <file>` makes them show up.
-
-## Asking the agent
-
-| Function | Prompt |
-| --- | --- |
-| `action("explain")` | What the code does and why it is written that way |
-| `action("explore")` | Callers, dependencies and related code, with `path:line` references |
-| `action("deep")` | Correctness bugs, edge cases, lifecycle and concurrency problems, missing tests, each checked against the code. Problems and open questions come back as findings, like a review's |
-| `action("ask")` | Your own question (`:ReviewAsk [question]` takes a range) |
-| `action("review")` | The whole change, in passes: behaviour against the base, lifecycle, threading, data flow, test coverage, CLAUDE.md files, code comments and git history. Only correctness and behaviour findings the agent is at least 80% sure of, ranked high, medium, low or question, each at a `path:line`. Review tab only |
-
-A review or a deep dive lists its findings in the agent pane, where `<CR>` jumps to each one and `c` drafts a GitHub comment from it. The diff shows each finding at the right edge of its line, with its severity in the sign column (`H`, `M`, `L` or `?`), and the files panel counts the findings not yet on GitHub. A new review replaces the previous review's findings that are not on GitHub yet; a deep dive adds to the list, skipping lines that already have a finding. The findings are saved with the review.
-
-In normal mode an action uses the hunk under the cursor, in visual mode the selection, and in the files panel the whole file. In the review tab the answer streams into the agent pane, which keeps the review conversation.
-
-Outside the review tab, in any buffer, the answer opens in a float under the selected code (or the cursor line plus 5 lines each side). It opens above the code near the bottom of the window and grows with the answer up to `float_height`. Each question asked from the code starts a new thread with a fresh agent session, and `a` asks a follow-up in that thread.
-
-| Key in the float | Effect |
-| --- | --- |
-| `a` | Ask a follow-up |
-| `<CR>`, `gf` | Jump to the `path:line` under the cursor |
-| `s` | Move the answer to a right split; the next question replaces it there until you close the split |
-| `<C-c>` | Cancel the running answer |
-| `q`, `<Esc>` | Close |
-
-`require("agentic_review").answer()` reopens the last answer, and `:ReviewRefs` sends every `path:line` in it to the quickfix list.
-
-## Commenting on GitHub
-
-On a line or selection in the diff, `:ReviewComment` (or `require("agentic_review").comment()`) opens a float for the comment. `:w`, `:wq` or `<C-s>` adds it to your pending review on the pull request, `gs` inserts a `suggestion` block with the selected lines, and `q` cancels. On a line with a finding, the float starts with the finding's text, ready to edit. `:ReviewSubmit` (or `S` in the files panel or the agent pane) asks whether to Comment, Approve or Request changes, then opens a float for the review's summary, which `:w` or `<C-s>` submits. It works without a pending review too: an approval needs no summary, while a comment or a change request with no line comments needs one, as on GitHub.
-
-`:ReviewCommentAll` (or `C` in the files panel or the agent pane) adds every finding not yet on GitHub to your pending review, as written by the agent. A finding whose line is outside every hunk, or that GitHub refuses, goes in as a comment on the whole file that starts with `Line <n>:`. The same applies to `:ReviewComment` on such a line. Each finding is sent once: one already on GitHub is skipped on the next run, and a finding the checks below refuse stays for the next run, listed in the notification.
-
-The pull request's open review threads show in the diff at their line, with the author, the first line of the first comment and `+N` for the replies, and the files panel and the go-to-file picker count them. `:ReviewThread` (or `require("agentic_review").thread()`) opens the threads on the cursor line in a float, where `r` replies to the thread under the cursor. The reply goes into your pending review like any other comment, and the float marks it as pending until you submit. Resolved and outdated threads are left out, as in GitHub's Files changed tab. The threads load when the review opens and again after `:ReviewSubmit`.
-
-Only a write command typed in the float sends the comment, so autosave setups that run `:wall` on `InsertLeave` or `TextChanged` do not post drafts. Before anything is sent, the plugin refuses:
-
-- lines outside a hunk that carry no finding, which GitHub does not accept
-- a local `HEAD` that differs from the PR head
-- head side comments on a file with unpushed or unsaved changes
-
-In each of these cases the line numbers would not match GitHub. For a branch review, the PR is the one `gh pr view` finds for the branch.
-
-## Agents
-
-`claude` runs `claude -p` with stream-json input and output as one process per conversation. Its tools are limited to `Read`, `Grep`, `Glob` and single `git diff`, `show`, `log`, `blame` and `grep` commands, with `--permission-mode dontAsk` and `--strict-mcp-config`. Your Claude Code hooks and `CLAUDE.md` files still apply.
-
-`pi` runs `pi --mode rpc` with `read`, `grep`, `find` and `ls`, and without extensions, skills or MCP. pi cannot limit `bash` to git commands, so it gets no shell, and each message includes the diff it needs.
-
-Each action can run on its own model, passed to the agent's `--model` flag. See [Configuration](#configuration).
-
-### Custom adapters
-
-An adapter is a table in `adapters`, picked by name with `agent`:
-
-| Field | Meaning |
-| --- | --- |
-| `cmd(ctx)` | Returns the argv, and optionally a session id. `ctx` has `system`, `prompt`, `session`, `root`, `label` and `model` |
-| `persistent` | When true, the process starts once and each prompt is written to its stdin with `encode(prompt)` |
-| `models` | Default model per action (`tour`, `explain`, `explore`, `deep`, `ask`, `review`), used when `models` and `model` in your config leave it out |
-| `set_model(model)` | Returns a stdin line that switches a running persistent process to `model`. Without it, a model change restarts the process on the same session |
-| `parse(line, emit)` | Turns one stdout line into `emit.text(s)`, `emit.tool(name, input)`, `emit.session(id)` and `emit.done(err)` |
-| `shell` | Whether the agent can run git; the system prompt changes accordingly |
-
-Without `parse`, stdout streams into the answer as plain text and the end of the process ends the answer. A minimal one-shot adapter:
-
-```lua
-opts = {
-  agent = "mycli",
-  adapters = {
-    mycli = {
-      cmd = function(ctx)
-        return { "mycli", "--print", ctx.system .. "\n\n" .. ctx.prompt }
-      end,
-    },
-  },
-}
-```
-
-That adapter starts from scratch on every question. A `persistent` one with `parse`, or a `cmd` that resumes `ctx.session`, keeps the conversation. The built-in adapters in `lua/agentic_review/init.lua` are complete examples.
+| Where | Key | What it does |
+| --- | --- | --- |
+| Files panel | `<CR>` | Open the file |
+| | `f` | Go to a file |
+| | `v` | Toggle viewed |
+| | `t` | Run the tour again |
+| | `r` | Review the whole change |
+| Files panel, agent pane | `C` | Add every finding to your pending GitHub review |
+| | `S` | Submit your GitHub review |
+| Agent pane | `<CR>`, `gf` | Jump to the `path:line` under the cursor |
+| | `c` | Draft a GitHub comment from the finding |
+| Diff | `]c`, `[c` | Next or previous hunk |
+| Go-to-file picker | `j`, `k` | Move between files |
+| | `/` | Filter by a fuzzy match on the path |
+| | `v` | Toggle viewed |
+| Answer float | `a` | Ask a follow-up |
+| | `<CR>`, `gf` | Jump to the `path:line` under the cursor |
+| | `s` | Move the answer to a right split |
+| | `<C-c>` | Cancel the answer |
+| Thread float | `r` | Reply to the thread under the cursor |
+| Comment and summary float | `:w`, `<C-s>` | Send |
+| | `gs` | Insert a `suggestion` block with the selected lines |
+| Every float, files panel | `q` | Close |
 
 ## Configuration
-
-Defaults:
 
 ```lua
 {
@@ -219,11 +151,22 @@ Defaults:
 }
 ```
 
-Each action picks its model from `models`, then `model`, then the adapter's own defaults. The claude adapter runs `deep` and `review` on opus and the other actions on sonnet. The agent pane and the float show the model that is answering.
+### Custom adapters
+
+An adapter is a table in `adapters`, picked by name with `agent`. The built-in ones in `lua/agentic_review/init.lua` are complete examples.
+
+| Field | Meaning |
+| --- | --- |
+| `cmd(ctx)` | Returns the argv, and optionally a session id. `ctx` has `system`, `prompt`, `session`, `root`, `label` and `model` |
+| `persistent` | Start the process once and write each prompt to its stdin with `encode(prompt)` |
+| `models` | Default model per action (`tour`, `explain`, `explore`, `deep`, `ask`, `review`) |
+| `set_model(model)` | Returns a stdin line that switches a running persistent process to `model` |
+| `parse(line, emit)` | Turns one stdout line into `emit.text(s)`, `emit.tool(name, input)`, `emit.session(id)` and `emit.done(err)` |
+| `shell` | Whether the agent can run git |
 
 ### Highlights
 
-The agent pane and the float colour their lines with these groups, each defined with `default`, so a `vim.api.nvim_set_hl()` in your config wins:
+Each group is defined with `default`, so your own `vim.api.nvim_set_hl()` wins.
 
 | Group | Used for | Default |
 | --- | --- | --- |
@@ -238,12 +181,10 @@ The agent pane and the float colour their lines with these groups, each defined 
 ## Development
 
 ```sh
-tests/run.sh                  # every spec, each in its own headless Neovim
+tests/run.sh                  # every spec, each in its own headless Neovim, with a fake agent and a fake gh
 tests/run.sh github_spec.lua  # one spec
 stylua --check lua tests
 ```
-
-The specs build a throwaway git repository and use fake agents and a fake `gh`, so they need neither network access nor accounts.
 
 ## License
 
