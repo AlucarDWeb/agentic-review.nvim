@@ -146,9 +146,11 @@ H.run(function()
     return last_note():find("Reply added to your pending review", 1, true) ~= nil
   end)
   check("reply added", replied, H.notes)
+  -- Neovim 0.10 writes "/" as "\/" in JSON, so the logged call is decoded before matching.
   local call = vim.tbl_filter(function(l)
     return l:find("addPullRequestReviewThreadReply", 1, true) ~= nil
-  end, vim.fn.readfile(vim.env.GH_FAKE_LOG))[1] or ""
+  end, vim.fn.readfile(vim.env.GH_FAKE_LOG))[1]
+  call = call and table.concat(vim.json.decode(call), "\n") or ""
   check(
     "reply goes to the thread and the pending review",
     call:find("thread=PRRT_src/cart.lua_17", 1, true)
