@@ -62,6 +62,10 @@ if args[1] == "api" and args[2] == "graphql" then
     end
     reply({ data = { addPullRequestReviewThread = { thread = { id = "T1" } } } })
   end
+  -- With an event the review is submitted at once, so no pending review is left.
+  if query:find("addPullRequestReview(", 1, true) and query:find("event:", 1, true) then
+    reply({ data = { addPullRequestReview = { pullRequestReview = { url = REVIEW_URL } } } })
+  end
   if query:find("addPullRequestReview(", 1, true) then
     io.open(pending, "w"):close()
     reply({ data = { addPullRequestReview = { pullRequestReview = { id = "PRR_1", url = REVIEW_URL } } } })

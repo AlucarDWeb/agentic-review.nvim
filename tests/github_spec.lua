@@ -218,24 +218,62 @@ H.run(function()
   end)
   check("<C-s> sends", vars(calls_with("addPullRequestReviewThread")[3]).body == "via ctrl-s")
 
+  local choice = "Approve"
   vim.ui.select = function(_, _, cb)
-    cb("Approve")
+    cb(choice)
   end
-  vim.ui.input = function(_, cb)
-    cb("LGTM")
+  local function summary(text)
+    vim.wait(3000, function()
+      local _, w = compose_buf()
+      return w and vim.api.nvim_win_get_config(w).title[1][1]:find("summary", 1, true) ~= nil
+    end)
+    local buf, w = compose_buf()
+    local title = w and vim.api.nvim_win_get_config(w).title[1][1] or ""
+    if buf and text then
+      vim.api.nvim_buf_set_lines(buf, 0, -1, false, { text })
+    end
+    typed("write")
+    return title
   end
   rg.submit()
+  local title = summary("LGTM")
+  check("summary float", title == " PR #7 · Approve · summary, optional ", title)
   vim.wait(5000, function()
     return last_note():find("Review submitted", 1, true) ~= nil
   end)
   v = vars(calls_with("submitPullRequestReview")[1])
   check("submit vars", v.event == "APPROVE" and v.body == "LGTM" and v.review == "PRR_1", v)
   check("comments cleared", panel_progress():find("pending") == nil, panel_progress())
+
+  -- Without a pending review, an approval needs no text and goes in as a new review.
+  H.notes = {}
   rg.submit()
-  vim.wait(3000, function()
-    return last_note():find("no pending review", 1, true) ~= nil
+  summary()
+  vim.wait(5000, function()
+    return last_note():find("Review submitted", 1, true) ~= nil
   end)
-  check("submit without pending", last_note():find("You have no pending review on PR #7", 1, true) ~= nil)
+  v = vars(calls_with("commitOID: $commit, event:")[1])
+  check("approve without pending", v.event == "APPROVE" and v.pr == "PR_7" and v.commit == H.head and v.body == nil, v)
+
+  -- A comment with no line comments needs a summary, as on GitHub.
+  choice = "Comment"
+  local function reviews_sent()
+    return #calls_with("addPullRequestReview(") + #calls_with("submitPullRequestReview")
+  end
+  local before = reviews_sent()
+  rg.submit()
+  title = summary()
+  vim.wait(300)
+  check("comment summary required", title == " PR #7 · Comment · summary ", title)
+  check(
+    "empty comment refused",
+    reviews_sent() == before
+      and compose_buf() ~= nil
+      and last_note():find("GitHub needs one to comment", 1, true) ~= nil,
+    { reviews_sent() - before, last_note() }
+  )
+  normal("q")
+  vim.wait(200)
 
   -- A local HEAD that differs from the PR head would put comments on the wrong lines.
   rg.close()

@@ -362,6 +362,13 @@ mutation($review: ID!, $event: PullRequestReviewEvent!, $body: String) {
   }
 }]]
 
+local GH_REVIEW = [[
+mutation($pr: ID!, $commit: GitObjectID!, $event: PullRequestReviewEvent!, $body: String) {
+  addPullRequestReview(input: {pullRequestId: $pr, commitOID: $commit, event: $event, body: $body}) {
+    pullRequestReview { url }
+  }
+}]]
+
 local GH_THREADS = [[
 query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
@@ -2065,6 +2072,7 @@ local function layout()
   map(state.bufs.agent, "c", comment_finding, "Comment on the finding in your pending GitHub review")
   for _, buf in ipairs({ state.bufs.files, state.bufs.agent }) do
     map(buf, "C", M.comment_all, "Add every finding to your pending GitHub review")
+    map(buf, "S", M.submit, "Submit your GitHub review")
   end
 end
 
@@ -2532,7 +2540,10 @@ local function writes(cmd)
   return false
 end
 
-local function compose(title, lines, on_submit, draft)
+-- opts.verb names the action in the footer, and opts.empty lets an empty text through.
+local function compose(title, lines, on_submit, draft, opts)
+  opts = opts or {}
+  local verb = opts.verb or "add"
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].buftype = "acwrite"
   vim.bo[buf].bufhidden = "wipe"
@@ -2551,7 +2562,7 @@ local function compose(title, lines, on_submit, draft)
     border = "rounded",
     title = " " .. title .. " ",
     title_pos = "center",
-    footer = lines and " :w or <C-s> add · q cancel · gs suggestion " or " :w or <C-s> add · q cancel ",
+    footer = (" :w or <C-s> %s · q cancel%s "):format(verb, lines and " · gs suggestion" or ""),
     footer_pos = "center",
   })
   local function close()
@@ -2561,8 +2572,8 @@ local function compose(title, lines, on_submit, draft)
   end
   local function submit()
     local body = vim.trim(table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n"))
-    if body == "" then
-      return notify("Empty comment, nothing added", vim.log.levels.WARN)
+    if body == "" and not opts.empty then
+      return notify(opts.empty_note or "Empty comment, nothing added", vim.log.levels.WARN)
     end
     vim.bo[buf].modified = false
     -- Closing on the next tick lets :wq quit the float itself instead of the window under it.
@@ -2850,10 +2861,7 @@ function M.submit()
   end
   async(function()
     local pr = pull_request()
-    local review = pending_review(pr)
-    if not review then
-      return notify(("You have no pending review on PR #%d"):format(pr.number))
-    end
+    local review, pr_id = pending_review(pr)
     local events = { Comment = "COMMENT", Approve = "APPROVE", ["Request changes"] = "REQUEST_CHANGES" }
     vim.ui.select({ "Comment", "Approve", "Request changes" }, {
       prompt = ("Submit your review on PR #%d as"):format(pr.number),
@@ -2861,23 +2869,33 @@ function M.submit()
       if not choice then
         return
       end
-      vim.ui.input({ prompt = "Review summary (optional): " }, function(body)
-        if body == nil then
-          return
-        end
+      -- GitHub takes an approval with no text, but a comment or a change request with no line comments needs one.
+      local optional = review or choice == "Approve"
+      local title = ("PR #%d · %s · summary%s"):format(pr.number, choice, optional and ", optional" or "")
+      compose(title, nil, function(body)
         async(function()
-          local vars = { review = review.id, event = events[choice] }
-          if vim.trim(body) ~= "" then
-            vars.body = body
+          local vars = { event = events[choice], body = body ~= "" and body or nil }
+          local url
+          if review then
+            vars.review = review.id
+            url = graphql(GH_SUBMIT, vars).submitPullRequestReview.pullRequestReview.url
+          else
+            vars.pr, vars.commit = pr_id, state.head or pr.head
+            url = graphql(GH_REVIEW, vars).addPullRequestReview.pullRequestReview.url
           end
-          local data = graphql(GH_SUBMIT, vars)
           state.comments = {}
           render_files()
           mark_lines()
-          notify("Review submitted: " .. data.submitPullRequestReview.pullRequestReview.url)
+          notify("Review submitted: " .. url)
           load_threads()
         end)
-      end)
+      end, nil, {
+        verb = "submit",
+        empty = optional,
+        empty_note = ("Write a summary: GitHub needs one to %s without line comments"):format(
+          choice == "Comment" and "comment" or "request changes"
+        ),
+      })
     end)
   end)
 end
