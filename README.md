@@ -23,6 +23,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 ```lua
 {
   "AlucarDWeb/agentic-review.nvim",
+  version = "*",
   cmd = { "Review", "ReviewClose", "ReviewCancel", "ReviewRefs", "ReviewAsk", "ReviewComment", "ReviewCommentAll", "ReviewThread", "ReviewSubmit", "ReviewFiles" },
   keys = {
     { "<leader>R", "", desc = "+review" },
@@ -60,7 +61,25 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 }
 ```
 
-The plugin sets no global keymaps; the table above is a suggestion. Without lazy.nvim, call `require("agentic_review").setup({})` once.
+The plugin sets no global keymaps; the table above is a suggestion. `version = "*"` keeps lazy.nvim on tagged releases.
+
+### Other plugin managers
+
+Neovim 0.12 has a built-in plugin manager:
+
+```lua
+vim.pack.add({ { src = "https://github.com/AlucarDWeb/agentic-review.nvim", version = vim.version.range("*") } })
+require("agentic_review").setup({})
+```
+
+On Neovim 0.10 and 0.11, clone the latest release tag into a package directory:
+
+```sh
+git clone --depth 1 --branch v0.1.0 https://github.com/AlucarDWeb/agentic-review.nvim \
+  ~/.local/share/nvim/site/pack/plugins/start/agentic-review.nvim
+```
+
+Then call `require("agentic_review").setup({})` once in your `init.lua`.
 
 ## Reviewing a branch or a pull request
 
