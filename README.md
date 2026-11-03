@@ -73,13 +73,13 @@ The plugin sets no global keymaps; the table above is a suggestion. Without lazy
 
 The review opens in its own tab: the base and head versions in Neovim's diff mode with the agent pane on their right, and the changed files in a panel across the bottom. When three columns would leave a diff pane narrower than `min_diff_width`, the diff takes the full width and the agent pane moves under it, above the files. For an added or deleted file, the diff side with content takes the empty side's width. On open the agent writes a short overview and reorders the files into a suggested reading order (`auto_tour`).
 
-- Files panel: `<CR>` opens a file, `f` goes to a file, `v` toggles viewed, `t` runs the tour again, `r` reviews the whole change, `C` adds every finding to your pending GitHub review, `q` closes the review
+- Files panel: `<CR>` opens a file, `f` goes to a file, `v` toggles viewed, `t` runs the tour again, `r` reviews the whole change, `C` adds every finding to your pending GitHub review, `S` submits your GitHub review, `q` closes the review
 - Diff: `]c` and `[c` move between hunks
-- Agent pane: `<CR>` or `gf` jumps to the `path:line` under the cursor, `c` on a finding drafts a GitHub comment from it, `C` adds every finding to your pending GitHub review
+- Agent pane: `<CR>` or `gf` jumps to the `path:line` under the cursor, `c` on a finding drafts a GitHub comment from it, `C` adds every finding to your pending GitHub review, `S` submits your GitHub review
 
 ### Going to a file
 
-`:ReviewFiles`, `require("agentic_review").files()` or `f` in the files panel opens a float with the changed files as a tree grouped by directory. Each row shows the status, `●` for the open file and `✓` for viewed ones, a badge with the number of review findings and their worst severity, and the lines added and removed.
+`:ReviewFiles`, `require("agentic_review").files()` or `f` in the files panel opens a float with the changed files as a tree grouped by directory. Each row shows the status, `●` for the open file and `✓` for viewed ones, a badge with the number of review findings and their worst severity, the number of open GitHub threads, and the lines added and removed.
 
 | Key | Effect |
 | --- | --- |
@@ -125,7 +125,7 @@ Outside the review tab, in any buffer, the answer opens in a float under the sel
 
 ## Commenting on GitHub
 
-On a line or selection in the diff, `:ReviewComment` (or `require("agentic_review").comment()`) opens a float for the comment. `:w`, `:wq` or `<C-s>` adds it to your pending review on the pull request, `gs` inserts a `suggestion` block with the selected lines, and `q` cancels. On a line with a finding, the float starts with the finding's text, ready to edit. `:ReviewSubmit` submits the review as Comment, Approve or Request changes.
+On a line or selection in the diff, `:ReviewComment` (or `require("agentic_review").comment()`) opens a float for the comment. `:w`, `:wq` or `<C-s>` adds it to your pending review on the pull request, `gs` inserts a `suggestion` block with the selected lines, and `q` cancels. On a line with a finding, the float starts with the finding's text, ready to edit. `:ReviewSubmit` (or `S` in the files panel or the agent pane) asks whether to Comment, Approve or Request changes, then opens a float for the review's summary, which `:w` or `<C-s>` submits. It works without a pending review too: an approval needs no summary, while a comment or a change request with no line comments needs one, as on GitHub.
 
 `:ReviewCommentAll` (or `C` in the files panel or the agent pane) adds every finding not yet on GitHub to your pending review, as written by the agent. A finding whose line is outside every hunk, or that GitHub refuses, goes in as a comment on the whole file that starts with `Line <n>:`. The same applies to `:ReviewComment` on such a line. Each finding is sent once: one already on GitHub is skipped on the next run, and a finding the checks below refuse stays for the next run, listed in the notification.
 

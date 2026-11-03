@@ -193,10 +193,12 @@ H.run(function()
   vim.ui.select = function(_, _, cb)
     cb("Comment")
   end
-  vim.ui.input = function(_, cb)
-    cb("")
-  end
   rg.submit()
+  vim.wait(3000, function()
+    return #H.floats() == 1
+  end)
+  vim.api.nvim_feedkeys(vim.keycode("<Esc>"), "xt", false)
+  vim.api.nvim_feedkeys(vim.keycode(":write<CR>"), "xt", false)
   vim.wait(5000, function()
     return thread_loads() > before
   end)

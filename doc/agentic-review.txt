@@ -66,6 +66,7 @@ Files panel ~
   t             run the tour again
   r             review the whole change
   C             add every finding to your pending GitHub review
+  S             submit your GitHub review
   q             close the review
 
 Agent pane ~
@@ -73,6 +74,7 @@ Agent pane ~
   c             on a finding, open its line and draft a GitHub comment
                 from it (see |agentic-review-github|)
   C             add every finding to your pending GitHub review
+  S             submit your GitHub review
 
 Use |]c| and |[c| to move between hunks.
 
@@ -80,7 +82,7 @@ Use |]c| and |[c| to move between hunks.
 |:ReviewFiles| opens a float with the changed files as a tree grouped by
 directory. Each row shows the status, `●` for the open file and `✓` for viewed
 ones, a badge with the number of review findings and their worst severity,
-and the lines added and removed.
+the number of open GitHub threads, and the lines added and removed.
 
   j, k          move between files
   /             filter by a fuzzy match on the path as you type; <CR> opens
@@ -165,7 +167,10 @@ ready to edit.
 
 Only a write command typed in the float sends the comment, so an autosave
 that runs |:wall| on |InsertLeave| or |TextChanged| does not post drafts.
-|:ReviewSubmit| submits the pending review.
+|:ReviewSubmit| (or `S` in the files panel or the agent pane) submits the
+review as Comment, Approve or Request changes, with a summary written in a
+float. It works without a pending review too: an approval needs no summary,
+while a comment or a change request with no line comments needs one.
 
 The pull request's open review threads show in the diff at their line,
 with the author, the first line of the first comment and `+N` for the
@@ -236,7 +241,8 @@ line numbers would not match GitHub. A branch review uses the PR that
 
                                                                *:ReviewSubmit*
 :ReviewSubmit
-    Submit your pending review as Comment, Approve or Request changes.
+    Submit your review as Comment, Approve or Request changes, with or
+    without a pending review.
 
                                                                 *:ReviewFiles*
 :ReviewFiles
