@@ -167,6 +167,13 @@ Only a write command typed in the float sends the comment, so an autosave
 that runs |:wall| on |InsertLeave| or |TextChanged| does not post drafts.
 |:ReviewSubmit| submits the pending review.
 
+The pull request's open review threads show in the diff at their line,
+with the author, the first line of the first comment and `+N` for the
+replies, and the files panel counts them. |:ReviewThread| opens the threads
+on the cursor line in a float. Resolved and outdated threads are left out,
+as in GitHub's Files changed tab. The threads load when the review opens and
+again after |:ReviewSubmit|.
+
 |:ReviewCommentAll| adds every finding not yet on GitHub to the pending
 review, as the agent wrote it. A finding whose line is outside every hunk, or
 that GitHub refuses, goes in as a comment on the whole file that starts with
@@ -219,6 +226,10 @@ line numbers would not match GitHub. A branch review uses the PR that
     Add every finding not yet on GitHub to your pending review. See
     |agentic-review-github|.
 
+                                                               *:ReviewThread*
+:ReviewThread
+    Read the open GitHub threads on the cursor line in a float.
+
                                                                *:ReviewSubmit*
 :ReviewSubmit
     Submit your pending review as Comment, Approve or Request changes.
@@ -254,6 +265,9 @@ comment({range})    Same as |:ReviewComment|.
 
                                                *agentic_review.comment_all()*
 comment_all()       Same as |:ReviewCommentAll|.
+
+                                                    *agentic_review.thread()*
+thread()            Same as |:ReviewThread|.
 
                                                     *agentic_review.submit()*
 submit()            Same as |:ReviewSubmit|.
