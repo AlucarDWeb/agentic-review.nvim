@@ -29,6 +29,16 @@ if args[1] == "api" and args[2] == "graphql" then
       query = a
     end
   end
+  if query:find("reviewThreads(", 1, true) then
+    -- GH_FAKE_THREADS names a JSON file with the thread nodes to return.
+    local nodes, path = {}, os.getenv("GH_FAKE_THREADS")
+    if path then
+      local f = assert(io.open(path))
+      nodes = vim.json.decode(f:read("*a"))
+      f:close()
+    end
+    reply({ data = { repository = { pullRequest = { reviewThreads = { nodes = nodes } } } } })
+  end
   if query:find("reviews(states: PENDING", 1, true) then
     local nodes = { { id = "PRR_other", url = "x", author = { login = "other" } } }
     if vim.uv.fs_stat(pending) then

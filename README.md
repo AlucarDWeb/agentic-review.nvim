@@ -23,7 +23,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 ```lua
 {
   "AlucarDWeb/agentic-review.nvim",
-  cmd = { "Review", "ReviewClose", "ReviewCancel", "ReviewRefs", "ReviewAsk", "ReviewComment", "ReviewCommentAll", "ReviewSubmit", "ReviewFiles" },
+  cmd = { "Review", "ReviewClose", "ReviewCancel", "ReviewRefs", "ReviewAsk", "ReviewComment", "ReviewCommentAll", "ReviewThread", "ReviewSubmit", "ReviewFiles" },
   keys = {
     { "<leader>R", "", desc = "+review" },
     { "<leader>Rr", "<cmd>Review<cr>", desc = "Review branch vs base" },
@@ -46,6 +46,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
     { "<leader>Rf", function() require("agentic_review").answer() end, desc = "Show last answer" },
     { "<leader>Rg", function() require("agentic_review").comment() end, mode = { "n", "x" }, desc = "Comment on GitHub" },
     { "<leader>RG", "<cmd>ReviewCommentAll<cr>", desc = "Send every finding to GitHub" },
+    { "<leader>Rk", "<cmd>ReviewThread<cr>", desc = "GitHub comments on the line" },
     { "<leader>RS", "<cmd>ReviewSubmit<cr>", desc = "Submit GitHub review" },
     { "<leader>Rn", function() require("agentic_review").next(1) end, desc = "Next file" },
     { "<leader>RN", function() require("agentic_review").next(-1) end, desc = "Previous file" },
@@ -127,6 +128,8 @@ Outside the review tab, in any buffer, the answer opens in a float under the sel
 On a line or selection in the diff, `:ReviewComment` (or `require("agentic_review").comment()`) opens a float for the comment. `:w`, `:wq` or `<C-s>` adds it to your pending review on the pull request, `gs` inserts a `suggestion` block with the selected lines, and `q` cancels. On a line with a finding, the float starts with the finding's text, ready to edit. `:ReviewSubmit` submits the review as Comment, Approve or Request changes.
 
 `:ReviewCommentAll` (or `C` in the files panel or the agent pane) adds every finding not yet on GitHub to your pending review, as written by the agent. A finding whose line is outside every hunk, or that GitHub refuses, goes in as a comment on the whole file that starts with `Line <n>:`. The same applies to `:ReviewComment` on such a line. Each finding is sent once: one already on GitHub is skipped on the next run, and a finding the checks below refuse stays for the next run, listed in the notification.
+
+The pull request's open review threads show in the diff at their line, with the author, the first line of the first comment and `+N` for the replies, and the files panel counts them. `:ReviewThread` (or `require("agentic_review").thread()`) opens the threads on the cursor line in a float. Resolved and outdated threads are left out, as in GitHub's Files changed tab. The threads load when the review opens and again after `:ReviewSubmit`.
 
 Only a write command typed in the float sends the comment, so autosave setups that run `:wall` on `InsertLeave` or `TextChanged` do not post drafts. Before anything is sent, the plugin refuses:
 

@@ -362,6 +362,17 @@ mutation($review: ID!, $event: PullRequestReviewEvent!, $body: String) {
   }
 }]]
 
+local GH_THREADS = [[
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100) {
+        nodes { isResolved path line diffSide comments(first: 50) { nodes { author { login } body } } }
+      }
+    }
+  }
+}]]
+
 -- A conversation owns one agent process and the buffer its answers stream into. The review has one, and
 -- each repository gets a quick one for questions asked outside the review tab.
 local function conversation(fields)
@@ -372,7 +383,7 @@ local state, agent
 local quick = {}
 
 local function reset()
-  state = { wins = {}, bufs = {}, files = {}, viewed = {}, comments = {}, findings = {} }
+  state = { wins = {}, bufs = {}, files = {}, viewed = {}, comments = {}, findings = {}, threads = {} }
   agent = conversation({ kind = "review" })
 end
 reset()
@@ -1082,6 +1093,9 @@ local function render_files()
   if unsent > 0 then
     progress = ("%s · %d finding%s"):format(progress, unsent, unsent == 1 and "" or "s")
   end
+  if #state.threads > 0 then
+    progress = ("%s · %d thread%s"):format(progress, #state.threads, #state.threads == 1 and "" or "s")
+  end
   if #state.comments > 0 then
     progress = ("%s · %d pending comment%s"):format(progress, #state.comments, #state.comments == 1 and "" or "s")
   end
@@ -1160,12 +1174,39 @@ local function mark(win, lnum, text, hl, sign)
   })
 end
 
+local function first_line(body)
+  return vim.trim((body:gsub("\r", "")):match("[^\n]*%S[^\n]*") or "")
+end
+
+-- A comment added in this session that GitHub already lists in a thread is drawn once, as the thread.
+local function on_github(c)
+  for _, t in ipairs(state.threads) do
+    if t.path == c.path and t.side == c.side and t.line == c.line then
+      for _, x in ipairs(t.comments) do
+        if vim.trim((x.body:gsub("\r", ""))) == vim.trim(c.body) then
+          return true
+        end
+      end
+    end
+  end
+  return false
+end
+
 local function mark_lines()
   clear_marks()
   local f = state.current
   for side, win in pairs({ LEFT = state.wins.base, RIGHT = state.wins.head }) do
+    for _, t in ipairs(state.threads) do
+      if f and win_ok(win) and t.path == f.path and t.side == side then
+        local text = ("%s: %s"):format(t.comments[1].author, first_line(t.comments[1].body))
+        if #t.comments > 1 then
+          text = ("%s +%d"):format(text, #t.comments - 1)
+        end
+        mark(win, t.line, text, "DiagnosticHint", "C")
+      end
+    end
     for _, c in ipairs(state.comments) do
-      if f and win_ok(win) and c.path == f.path and c.side == side then
+      if f and win_ok(win) and c.path == f.path and c.side == side and not on_github(c) then
         mark(win, c.line, c.body:match("^[^\n]*"), "DiagnosticHint", "C")
       end
     end
@@ -2054,6 +2095,8 @@ local function default_base(root)
   error("No base branch found. Pass one, for example :Review origin/develop", 0)
 end
 
+local load_threads
+
 local function start(spec, fresh)
   if state.tab then
     M.close()
@@ -2080,6 +2123,7 @@ local function start(spec, fresh)
   show(next_unviewed() or state.files[1])
   persist()
   status(agent)
+  load_threads()
   if not agent.session and M.config.auto_tour then
     M.tour()
   end
@@ -2425,6 +2469,94 @@ local function finding_body(x, whole_file)
   return whole_file and ("Line %d: %s"):format(x.line, body) or body
 end
 
+-- Only open threads are kept: GitHub collapses resolved ones, and an outdated one has no line in this diff.
+load_threads = function()
+  local key = state.key
+  async(function()
+    local ok, data = pcall(function()
+      local pr = pull_request()
+      return graphql(GH_THREADS, { owner = pr.owner, repo = pr.repo, number = pr.number })
+    end)
+    if state.key ~= key then
+      return
+    end
+    if not ok then
+      -- A branch without a pull request has no threads, so only a PR review reports the failure.
+      if state.pr then
+        notify("Could not load the PR's comments: " .. tostring(data), vim.log.levels.WARN)
+      end
+      return
+    end
+    local list = {}
+    for _, t in ipairs(data.repository.pullRequest.reviewThreads.nodes) do
+      local comments = vim.tbl_map(function(c)
+        return { author = c.author and c.author.login or "ghost", body = c.body or "" }
+      end, t.comments.nodes)
+      if t.line and not t.isResolved and #comments > 0 then
+        list[#list + 1] = { path = t.path, side = t.diffSide, line = t.line, comments = comments }
+      end
+    end
+    state.threads = list
+    render_files()
+    mark_lines()
+  end)
+end
+
+function M.thread()
+  if not state.tab then
+    return notify("No review open. Start one with :Review", vim.log.levels.WARN)
+  end
+  local win, f = vim.api.nvim_get_current_win(), state.current
+  if not f or (win ~= state.wins.base and win ~= state.wins.head) then
+    return notify("Move the cursor to a line in the diff to read its comments", vim.log.levels.WARN)
+  end
+  local side = win == state.wins.base and "LEFT" or "RIGHT"
+  local lnum = vim.api.nvim_win_get_cursor(win)[1]
+  local lines = {}
+  for _, t in ipairs(state.threads) do
+    if t.path == f.path and t.side == side and t.line == lnum then
+      if #lines > 0 then
+        vim.list_extend(lines, { "", "---", "" })
+      end
+      for i, c in ipairs(t.comments) do
+        if i > 1 then
+          lines[#lines + 1] = ""
+        end
+        lines[#lines + 1] = "**" .. c.author .. "**"
+        vim.list_extend(lines, vim.split((c.body:gsub("\r", "")), "\n", { plain = true }))
+      end
+    end
+  end
+  if #lines == 0 then
+    return notify(("No open GitHub comments on line %d"):format(lnum))
+  end
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].bufhidden = "wipe"
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+  vim.bo[buf].filetype = "markdown"
+  local float = vim.api.nvim_open_win(buf, true, {
+    relative = "cursor",
+    row = 1,
+    col = 0,
+    width = math.max(20, math.min(M.config.float_width, vim.o.columns - 4)),
+    height = 1,
+    border = "rounded",
+    title = (" %s:%d "):format(f.path, lnum),
+    title_pos = "left",
+    footer = " q close ",
+    footer_pos = "right",
+  })
+  vim.wo[float].wrap, vim.wo[float].linebreak = true, true
+  local needed = vim.api.nvim_win_text_height(float, {}).all
+  vim.api.nvim_win_set_config(float, { height = math.max(1, math.min(M.config.float_height, needed)) })
+  for _, lhs in ipairs({ "q", "<Esc>" }) do
+    vim.keymap.set("n", lhs, function()
+      pcall(vim.api.nvim_win_close, float, true)
+    end, { buffer = buf, nowait = true, desc = "Close" })
+  end
+end
+
 -- Ex commands that write the current buffer, with the shortest abbreviation Vim accepts for each.
 local WRITE_CMDS = { write = 1, wq = 2, xit = 1, exit = 3, update = 2, wall = 2, wqall = 3, xall = 2 }
 
@@ -2687,6 +2819,7 @@ function M.submit()
           render_files()
           mark_lines()
           notify("Review submitted: " .. data.submitPullRequestReview.pullRequestReview.url)
+          load_threads()
         end)
       end)
     end)
@@ -2731,6 +2864,7 @@ function M.setup(opts)
     M.comment(o.range > 0 and { o.line1, o.line2 } or nil)
   end, { range = true, desc = "Add a comment on the line or range to your pending GitHub review" })
   cmd("ReviewCommentAll", M.comment_all, { desc = "Add every finding to your pending GitHub review" })
+  cmd("ReviewThread", M.thread, { desc = "Read the open GitHub comments on the line" })
   cmd("ReviewSubmit", M.submit, { desc = "Submit your pending GitHub review" })
   cmd("ReviewFiles", M.files, { desc = "Go to a changed file in the review" })
   local group = vim.api.nvim_create_augroup("agentic_review", { clear = true })
