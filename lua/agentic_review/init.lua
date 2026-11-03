@@ -2872,7 +2872,10 @@ function M.submit()
       -- GitHub takes an approval with no text, but a comment or a change request with no line comments needs one.
       local optional = review or choice == "Approve"
       local title = ("PR #%d · %s · summary%s"):format(pr.number, choice, optional and ", optional" or "")
-      compose(title, nil, function(body)
+      local note = ("Write a summary: GitHub needs one to %s without line comments"):format(
+        choice == "Comment" and "comment" or "request changes"
+      )
+      local function send(body)
         async(function()
           local vars = { event = events[choice], body = body ~= "" and body or nil }
           local url
@@ -2889,13 +2892,8 @@ function M.submit()
           notify("Review submitted: " .. url)
           load_threads()
         end)
-      end, nil, {
-        verb = "submit",
-        empty = optional,
-        empty_note = ("Write a summary: GitHub needs one to %s without line comments"):format(
-          choice == "Comment" and "comment" or "request changes"
-        ),
-      })
+      end
+      compose(title, nil, send, nil, { verb = "submit", empty = optional, empty_note = note })
     end)
   end)
 end
