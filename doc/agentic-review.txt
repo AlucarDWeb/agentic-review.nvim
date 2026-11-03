@@ -169,10 +169,13 @@ that runs |:wall| on |InsertLeave| or |TextChanged| does not post drafts.
 
 The pull request's open review threads show in the diff at their line,
 with the author, the first line of the first comment and `+N` for the
-replies, and the files panel counts them. |:ReviewThread| opens the threads
-on the cursor line in a float. Resolved and outdated threads are left out,
-as in GitHub's Files changed tab. The threads load when the review opens and
-again after |:ReviewSubmit|.
+replies, and the files panel and the go-to-file picker count them.
+|:ReviewThread| opens the threads on the cursor line in a float, where `r`
+replies to the thread under the cursor. The reply goes into your pending
+review like any other comment, and the float marks it as pending until you
+submit. Resolved and outdated threads are left out, as in GitHub's Files
+changed tab. The threads load when the review opens and again after
+|:ReviewSubmit|.
 
 |:ReviewCommentAll| adds every finding not yet on GitHub to the pending
 review, as the agent wrote it. A finding whose line is outside every hunk, or
@@ -228,7 +231,8 @@ line numbers would not match GitHub. A branch review uses the PR that
 
                                                                *:ReviewThread*
 :ReviewThread
-    Read the open GitHub threads on the cursor line in a float.
+    Read the open GitHub threads on the cursor line in a float. `r` replies
+    to the thread under the cursor in your pending review.
 
                                                                *:ReviewSubmit*
 :ReviewSubmit
