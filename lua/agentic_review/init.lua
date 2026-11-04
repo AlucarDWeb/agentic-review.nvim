@@ -2295,9 +2295,22 @@ function M.tour()
   ask("tour", "## Tour\n", whole_change("Start the review.", TOUR), function(reply)
     local block = reply:match("```review%-order[^\n]*\n(.-)```")
     if block then
+      local first = state.files[1]
       state.files = order(state.files, split_lines(block))
       persist()
-      render_files()
+      -- A reader still on the unviewed opening file moves to the tour's first file, so v advances in tour order.
+      if state.current == first and not state.viewed[first.path] and state.files[1] ~= first then
+        local win = vim.api.nvim_get_current_win()
+        show(state.files[1])
+        if win_ok(win) and win ~= state.wins.base and win ~= state.wins.head then
+          vim.api.nvim_set_current_win(win)
+        end
+      else
+        render_files()
+        if win_ok(state.wins.files) and index_of(state.current) then
+          pcall(vim.api.nvim_win_set_cursor, state.wins.files, { HEADER + index_of(state.current), 0 })
+        end
+      end
     end
   end)
 end

@@ -57,7 +57,9 @@ bottom. When three columns would leave a diff pane narrower than
 `min_diff_width`, the diff takes the full width and the agent pane moves
 under it, above the files. For an added or deleted file, the diff side with
 content takes the empty side's width. When it opens, the agent writes an
-overview and reorders the files (see `auto_tour`).
+overview and reorders the files (see `auto_tour`). If you are still on the
+opening file and have not marked it viewed, the diff moves to the first file
+of the new order.
 
 Files panel ~
   <CR>          open the file under the cursor
