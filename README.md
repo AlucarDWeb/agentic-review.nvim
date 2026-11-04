@@ -148,6 +148,7 @@ git clone --depth 1 --branch v0.1.1 https://github.com/AlucarDWeb/agentic-review
   auto_tour = true, -- overview and reading order when a review opens
   max_context_lines = 300, -- longest hunk or selection sent with an action
   max_tour_lines = 1500, -- diff sent with the tour to agents without a shell
+  review_prompt = nil, -- your own review prompt or slash command, see :h agentic-review-review-prompt
 }
 ```
 
