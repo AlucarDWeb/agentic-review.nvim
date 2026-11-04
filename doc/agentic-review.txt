@@ -127,7 +127,8 @@ Five actions, run with |agentic_review.action()|:
                 files, code comments and git history. It reports only
                 correctness and behaviour findings the agent is at least 80%
                 sure of, ranked high, medium, low or question, each at a
-                path:line. Review tab only.
+                path:line. Review tab only. Set `review_prompt` to send your
+                own prompt instead, see |agentic-review-review-prompt|.
 
                                                      *agentic-review-findings*
 Findings from a review or a deep dive are listed in the agent pane and shown
@@ -353,6 +354,7 @@ Defaults: >lua
       auto_tour = true,
       max_context_lines = 300,
       max_tour_lines = 1500,
+      review_prompt = nil,
     }
 <
   agent             adapter name, or an adapter table
@@ -370,6 +372,32 @@ Defaults: >lua
   auto_tour         write an overview and reading order on open
   max_context_lines longest hunk or selection sent with an action
   max_tour_lines    diff sent with the tour to agents without a shell
+  review_prompt     message for the `review` action, see
+                    |agentic-review-review-prompt|
+
+                                                *agentic-review-review-prompt*
+`review_prompt` replaces the built-in review prompt. The plugin sends it as
+is, without the file list, so a slash command such as `/my-review` reaches
+the agent unchanged. A function gets `{ root, base, head, pr }`, where `pr` is
+the pull request number or nil, and returns the message, or nil for the
+built-in prompt. Returning nil keeps the built-in review in repositories
+where the command is not installed: >lua
+
+    review_prompt = function(ctx)
+      if vim.uv.fs_stat(ctx.root .. "/.claude/commands/my-review.md") then
+        return "/my-review"
+      end
+    end
+<
+The reply's findings land in the diff like the built-in review's. Besides
+`[severity] path:line: title` lines, the plugin reads markdown headings such
+as "### `path:line` (severity 7)": 7 to 10 is high, 4 to 6 medium and 1 to 3
+low. Such a finding's body runs to the next heading, code blocks included,
+and its first line is the title.
+
+With the claude adapter, Bash runs only git commands. A slash command that
+needs more declares it in the `allowed-tools` of its skill, which the agent
+honours while the skill runs.
 
 Each action takes its model from `models`, then `model`, then the adapter's
 defaults. The claude adapter runs `deep` and `review` on opus and the other

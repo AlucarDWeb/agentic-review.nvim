@@ -18,6 +18,8 @@ M.config = {
   auto_tour = true,
   max_context_lines = 300,
   max_tour_lines = 1500,
+  -- Message sent as is for a whole-change review instead of the built-in prompt, or a function returning it.
+  review_prompt = nil,
 }
 
 local function decode(line)
@@ -253,8 +255,16 @@ local BADGES = {
 local SIGNS = { high = "H", medium = "M", low = "L", question = "?" }
 
 -- Reads a `[severity] path:line: title` heading through the list markers, heading marks, bold and backticks
--- that agents wrap it in.
+-- that agents wrap it in. A markdown heading such as "### `path:line` (severity 7)" is a finding too: its
+-- 1 to 10 score maps onto the severities and the fifth return value marks it.
 local function finding_of(line)
+  if line:match("^#+%s") then
+    local path, lnum, score = line:match("^#+%s+`" .. REF .. "`%s+%(severity (%d+)%)%s*$")
+    if path then
+      score = tonumber(score)
+      return score >= 7 and "high" or score >= 4 and "medium" or "low", path, lnum, "", true
+    end
+  end
   local s = line:gsub("^[%s>#]*", ""):gsub("^%d+[%.%)]%s+", ""):gsub("^[%-%*%+%s]*", "")
   local severity, rest = s:match("^%[(%a+)%][%*_:]*%s+(.*)$")
   local path, lnum, title = (rest or ""):match("^[%*`]*" .. REF .. "[%*`]*(.*)$")
@@ -315,9 +325,12 @@ local function paint(buf, first, last)
     elseif line:match("^_error: .*_$") then
       hl(row, 0, #line, "AgenticReviewError")
     else
-      local severity = finding_of(line)
+      local severity, _, _, _, heading = finding_of(line)
       local badge = severity and BADGES[severity:lower()]
-      if badge then
+      if badge and heading then
+        local s, e = line:find("%(severity %d+%)")
+        hl(row, s - 1, e, badge[1])
+      elseif badge then
         local s, e = line:find("%[%a+%]")
         hl(row, s - 1, e, badge[1])
         local title = line:find("[^`:%s]", select(2, line:find(REF, e)) + 1)
@@ -2002,14 +2015,23 @@ end
 
 -- Comments on the finding whose heading is on or above the cursor in the agent pane.
 local function comment_finding()
-  local buf = state.bufs.agent
-  local function line_at(i)
-    return i >= 1 and vim.api.nvim_buf_get_lines(buf, i - 1, i, false)[1] or ""
+  local rows = vim.api.nvim_buf_get_lines(state.bufs.agent, 0, vim.api.nvim_win_get_cursor(0)[1], false)
+  local fenced, inside = false, {}
+  for i, line in ipairs(rows) do
+    local fence = line:match("^%s*```") ~= nil
+    fenced = fenced ~= fence
+    inside[i] = fenced and not fence
   end
-  for i = vim.api.nvim_win_get_cursor(0)[1], 1, -1 do
-    local line = line_at(i)
-    local severity, path, lnum = finding_of(line)
-    if severity then
+  local gap = false
+  for i = #rows, 1, -1 do
+    local line = rows[i]
+    local severity, path, lnum, _, heading
+    if not inside[i] then
+      severity, path, lnum, _, heading = finding_of(line)
+    end
+    if severity and gap and not heading then
+      break
+    elseif severity then
       local f = resolve(path)
       if not f then
         return notify("Not part of this change: " .. path, vim.log.levels.WARN)
@@ -2022,9 +2044,11 @@ local function comment_finding()
       pcall(vim.api.nvim_win_set_cursor, win, { tonumber(lnum), 0 })
       return M.comment()
     end
-    if line:match("^## ") or (vim.trim(line) == "" and not finding_of(line_at(i - 1))) then
+    -- A heading finding's body runs to the next heading, so a blank line only ends the other kind.
+    if not inside[i] and line:match("^#+%s") then
       break
     end
+    gap = gap or (vim.trim(line) == "" and not finding_of(rows[i - 1] or ""))
   end
   notify("Move the cursor to a finding to comment on it", vim.log.levels.WARN)
 end
@@ -2227,16 +2251,38 @@ end
 
 -- A finding's detail is the paragraph under its heading line, line breaks kept. Findings on files outside the
 -- change are only counted, since the diff cannot show them and GitHub cannot take them.
+-- A heading finding's body runs to the next heading outside a code fence: its first line is the title and the
+-- rest, blank lines included, is the detail.
 local function parse_findings(reply)
-  local found, outside, current = {}, 0, nil
+  local found, outside, current, body, fenced = {}, 0, nil, nil, false
+  local function close()
+    if body then
+      local text = vim.trim(table.concat(body, "\n"))
+      body.finding.title, body.finding.detail = text:match("^([^\n]*)\n*(.*)$")
+    end
+    body, fenced = nil, false
+  end
   for line in (reply .. "\n"):gmatch("([^\n]*)\n") do
-    local severity, path, lnum, title = finding_of(line)
+    local severity, path, lnum, title, heading
+    if not fenced then
+      severity, path, lnum, title, heading = finding_of(line)
+    end
     local f = severity and resolve(path)
+    if severity then
+      close()
+    end
     if severity and not f then
       outside, current = outside + 1, nil
     elseif severity then
       current = { severity = severity:lower(), path = f.path, line = tonumber(lnum), title = title, detail = "" }
       found[#found + 1] = current
+      body = heading and { finding = current } or nil
+    elseif body and not fenced and line:match("^#") then
+      close()
+      current = nil
+    elseif body then
+      fenced = fenced ~= (line:match("^%s*```") ~= nil)
+      body[#body + 1] = (line:gsub("%s+$", ""))
     elseif current and (vim.trim(line) == "" or line:match("^#")) then
       current = current.detail == "" and vim.trim(line) == "" and current or nil
     elseif current then
@@ -2244,6 +2290,7 @@ local function parse_findings(reply)
       current.detail = current.detail == "" and vim.trim(line) or (current.detail .. "\n" .. line)
     end
   end
+  close()
   return found, outside
 end
 
@@ -2272,7 +2319,14 @@ local function add_findings(found, source)
 end
 
 local function review_change()
-  ask("review", "## Review\n", whole_change("Review the change below.", review_prompt(adapter().shell)), function(reply)
+  local prompt = M.config.review_prompt
+  if type(prompt) == "function" then
+    prompt = prompt({ root = state.root, base = state.base, head = state.head, pr = state.pr and state.pr.number })
+  end
+  if type(prompt) ~= "string" or vim.trim(prompt) == "" then
+    prompt = whole_change("Review the change below.", review_prompt(adapter().shell))
+  end
+  ask("review", "## Review\n", prompt, function(reply)
     local found, outside = parse_findings(reply)
     add_findings(found, "review")
     notify(plural(#found, "finding") .. (outside > 0 and (", %d outside the change"):format(outside) or ""))
