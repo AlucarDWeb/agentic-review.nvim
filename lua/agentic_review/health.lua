@@ -1,7 +1,5 @@
 local M = {}
 
-local AGENT_BINARIES = { claude = "claude", pi = "pi" }
-
 function M.check()
   local health = vim.health
   health.start("agentic-review")
@@ -26,15 +24,23 @@ function M.check()
     health.ok("gh found and logged in")
   end
 
-  local agent = require("agentic_review").config.agent
-  local name = type(agent) == "table" and (agent.name or "custom") or agent
-  local binary = AGENT_BINARIES[name]
-  if not binary then
+  local rg = require("agentic_review")
+  local name, a, installed = rg._agent()
+  local agent = rg.config.agent
+  if type(agent) == "table" and vim.islist(agent) then
+    health.info(("Agents in order: %s. Using %q"):format(table.concat(agent, ", "), tostring(name)))
+  end
+  if not a then
+    health.error(("Agent %q has no adapter"):format(tostring(name)))
+  elseif not (a.bin or a.available) then
     health.info(("Agent %q is a custom adapter, so its executable is not checked"):format(name))
-  elseif vim.fn.executable(binary) == 1 then
-    health.ok(("Agent %q: %s found"):format(name, binary))
+  elseif installed then
+    health.ok(("Agent %q: %s found"):format(name, a.bin or name))
   else
-    health.error(("Agent %q: %s not found on PATH"):format(name, binary))
+    health.error(("Agent %q: %s not found on PATH, or one of its extensions is missing"):format(name, a.bin or name))
+  end
+  if rg.config.interactive and a and not a.interactive then
+    health.warn(("Agent %q has no interactive interface, so the agent pane stays headless"):format(name))
   end
 
   local ok, image = pcall(function()
