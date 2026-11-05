@@ -67,6 +67,8 @@ Files panel ~
   v             toggle viewed
   t             run the tour again
   r             review the whole change
+  F             list the findings by severity, see
+                |agentic-review-findings-picker|
   C             add every finding to your pending GitHub review
   S             submit your GitHub review
   q             close the review
@@ -75,8 +77,12 @@ Agent pane ~
   <CR>, gf      jump to the path:line under the cursor
   c             on a finding, open its line and draft a GitHub comment
                 from it (see |agentic-review-github|)
+  F             list the findings by severity
   C             add every finding to your pending GitHub review
   S             submit your GitHub review
+
+With `interactive` the agent pane shows the agent's own interface instead,
+with its own keys, see |agentic-review-interactive|.
 
 Use |]c| and |[c| to move between hunks.
 
@@ -133,8 +139,23 @@ Five actions, run with |agentic_review.action()|:
                                                      *agentic-review-findings*
 Findings from a review or a deep dive are listed in the agent pane and shown
 at the right edge of their line in the diff, with the severity in the sign
-column: `H`, `M`, `L` or `?`. The files panel counts the findings not yet on
-GitHub. A new review replaces the previous review's findings that are not on
+column: `H`, `M`, `L` or `?`. The rest of a finding's text shows under its
+line, wrapped to the window, and the other side of the diff gets as many
+blank lines so both sides stay level. After a review, the agent pane lists
+its findings again under one heading per severity, high first, where <CR>
+and `c` work on each line. The files panel counts the findings not yet on
+GitHub.
+
+                                              *agentic-review-findings-picker*
+|:ReviewFindings|, or `F` in the files panel and the agent pane, opens a float
+with the findings not yet on GitHub under one heading per severity, high
+first. With `findings_picker` it opens by itself after a review that found
+something.
+
+  j, k          move between findings
+  <CR>          open the finding's line in the diff
+  c             open it and draft a GitHub comment from it
+  q, <Esc>      close A new review replaces the previous review's findings that are not on
 GitHub yet; a deep dive adds to the list, skipping lines that already have a
 finding. Findings are saved with the review.
 
@@ -251,6 +272,10 @@ line numbers would not match GitHub. A branch review uses the PR that
 :ReviewFiles
     Go to a changed file. See |agentic-review-files|.
 
+                                                             *:ReviewFindings*
+:ReviewFindings
+    List the findings by severity. See |agentic-review-findings-picker|.
+
 ==============================================================================
 8. LUA FUNCTIONS                                          *agentic-review-lua*
 
@@ -272,6 +297,9 @@ answer()            Reopen the last float answer for this repository.
 
                                                      *agentic_review.files()*
 files()             Same as |:ReviewFiles|.
+
+                                                  *agentic_review.findings()*
+findings()          Same as |:ReviewFindings|.
 
                                                    *agentic_review.comment()*
 comment({range})    Same as |:ReviewComment|.
@@ -309,17 +337,40 @@ claude ~
     conversation. Tools: Read, Grep, Glob and single `git diff`, `show`,
     `log`, `blame` and `grep` commands, with `--permission-mode dontAsk` and
     `--strict-mcp-config`. Claude Code hooks and CLAUDE.md files still apply.
+    With |agentic-review-review-shell| the review allows every Bash command.
+    With `interactive`, `claude` runs in the agent pane with your own
+    permission settings, see |agentic-review-interactive|.
 
 pi ~
     `pi --mode rpc` with read, grep, find and ls, without extensions, skills
     or MCP. It has no shell, because pi cannot limit bash to git, so each
-    message includes the diff it needs.
+    message includes the diff it needs. With |agentic-review-review-shell|
+    the review also gets bash. `extensions` and `skills` list paths that pi
+    loads with `-e` and `--skill`, for example a provider extension that
+    runs Claude models through Claude Code: >lua
+
+    adapters = {
+      pi = {
+        extensions = { "~/.pi/agent/npm/node_modules/pi-claude-bridge" },
+        skills = { "~/skills/my-review" },
+        models = { review = "claude-bridge/claude-opus-5-5" },
+      },
+    },
+<
+    With `interactive`, pi runs in the agent pane with the plugin's own
+    extension, `pi/agentic-review.ts`, see |agentic-review-interactive|.
+    A configured extension that is missing makes pi count as not installed.
 
                                                        *agentic-review-adapter*
-An adapter is a table:
+An adapter is a table. A table in `adapters` under a built-in adapter's name
+changes only the fields it sets.
 
-  cmd(ctx)          Return the argv, and optionally a session id. {ctx} has
-                    `system`, `prompt`, `session`, `root`, `label`, `model`.
+  cmd(ctx, adapter) Return the argv, and optionally a session id. {ctx} has
+                    `system`, `prompt`, `session`, `root`, `label`, `model`,
+                    `action` and `full_shell`, which is true for a review
+                    with |agentic-review-review-shell|. A change of
+                    `full_shell` restarts a persistent process on the same
+                    session. {adapter} is the adapter table itself.
   persistent        When true the process starts once, and each prompt is
                     written to stdin as `encode(prompt)`.
   models            Default model per action: `tour`, `explain`,
@@ -331,6 +382,30 @@ An adapter is a table:
                     `emit.tool(name, input)`, `emit.session(id)` and
                     `emit.done(err)`.
   shell             Whether the agent can run git.
+  bin               The executable, for picking the first installed agent
+                    from a list in `agent`.
+  available(adapter) Return whether the agent can run. Without it, `bin`
+                    must be executable.
+
+For |agentic-review-interactive|:
+
+  interactive(ctx, adapter)
+                    Return the argv of the agent's interface, and optionally
+                    a session id and a table of environment variables. {ctx}
+                    has `system`, `root`, `label`, `model`, `session`, `dir`,
+                    `inbox` and `outbox`.
+  deliver(t, msg)   Send {msg} to the session. {t} has `job`, the terminal
+                    job, and `ready`. Without it, {msg} is appended to
+                    `inbox` as a JSON line.
+  reply(line)       Turn one line of `outbox` into `{ text, id, session }`,
+                    or `{ ready = true }` when the session can take input.
+                    Without it, the line is decoded as JSON.
+  abort(t)          Stop the request that is running. Without it, an
+                    `{ "type": "abort" }` line goes to `inbox`.
+  tagged            Whether replies carry the `id` of the request they
+                    answer, so a reply to a typed prompt can be told apart.
+
+A request is `{ id, prompt, model, full_shell }`.
 
 Without `parse`, stdout is shown as plain text and the end of the process ends
 the answer. Register adapters under `adapters` and pick one with `agent`.
@@ -355,9 +430,14 @@ Defaults: >lua
       max_context_lines = 300,
       max_tour_lines = 1500,
       review_prompt = nil,
+      review_shell = false,
+      interactive = false,
+      findings_picker = false,
     }
 <
-  agent             adapter name, or an adapter table
+  agent             adapter name, an adapter table, or a list of names: the
+                    first one whose agent is installed, for example
+                    `{ "pi", "claude" }`
   model             model for every action not in `models`
   models            model per action, for example `{ deep = "opus" }`
   files_height      height of the files panel at the bottom, in rows
@@ -374,13 +454,19 @@ Defaults: >lua
   max_tour_lines    diff sent with the tour to agents without a shell
   review_prompt     message for the `review` action, see
                     |agentic-review-review-prompt|
+  review_shell      give the `review` action a shell that runs any command,
+                    see |agentic-review-review-shell|
+  interactive       run the agent's own interface in the agent pane, see
+                    |agentic-review-interactive|
+  findings_picker   open the findings picker after a review that found
+                    something, see |agentic-review-findings-picker|
 
                                                 *agentic-review-review-prompt*
 `review_prompt` replaces the built-in review prompt. The plugin sends it as
 is, without the file list, so a slash command such as `/my-review` reaches
-the agent unchanged. A function gets `{ root, base, head, pr }`, where `pr` is
-the pull request number or nil, and returns the message, or nil for the
-built-in prompt. Returning nil keeps the built-in review in repositories
+the agent unchanged. A function gets `{ root, base, head, pr, agent }`, where
+`pr` is the pull request number or nil and `agent` the adapter's name, and
+returns the message, or nil for the built-in prompt. Returning nil keeps the built-in review in repositories
 where the command is not installed: >lua
 
     review_prompt = function(ctx)
@@ -395,9 +481,48 @@ as "### `path:line` (severity 7)": 7 to 10 is high, 4 to 6 medium and 1 to 3
 low. Such a finding's body runs to the next heading, code blocks included,
 and its first line is the title.
 
-With the claude adapter, Bash runs only git commands. A slash command that
-needs more declares it in the `allowed-tools` of its skill, which the agent
-honours while the skill runs.
+With the claude adapter, Bash runs only git commands, and any other tool call
+is denied because nothing can answer a permission prompt. A skill can widen
+that with its `allowed-tools`. A command that needs more can run with a full
+shell, or in the interactive pane, where claude asks before each step.
+
+                                                 *agentic-review-review-shell*
+With `review_shell` set, the agent restarts on the same session with a shell
+that runs any command, sends the review, and restarts without it for the next
+action. The claude adapter allows every Bash command, and the pi adapter adds
+bash. Nothing asks before a command runs, so the agent can fetch, run scripts
+or call `gh`, and nothing stops it from running anything else. Its system
+prompt tells it not to edit files, commit, push or change the checked-out
+branch. A function gets the same table as `review_prompt` and returns whether
+to use the full shell: >lua
+
+    review_prompt = "/skill:my-review",
+    review_shell = function(ctx)
+      return vim.uv.fs_stat(ctx.root .. "/.pi/skills/my-review") ~= nil
+    end,
+<
+
+                                                  *agentic-review-interactive*
+With `interactive`, the agent pane of the review tab runs the agent's own
+interface in a terminal, on the same session the headless agent would use.
+It starts with the review and resumes the saved session. Actions send their
+requests to it, and each finished reply goes back to the plugin, so the tour
+reorders the files and findings land in the diff as in the headless pane.
+Findings from a prompt you type into the session land too. The pane comes
+back when the session exits, the next action starts it again, and
+|:ReviewClose| ends it. Floats outside the review tab stay headless.
+
+pi ~
+    Loads `pi/agentic-review.ts`, which takes requests from Neovim, switches
+    to each action's model and writes every reply back. Bash is on for what
+    you type and for a review with |agentic-review-review-shell|; for every
+    other action from Neovim the extension blocks it.
+
+claude ~
+    Requests are pasted into the prompt once Claude Code is ready, and a
+    Stop hook added with `--settings` writes every reply back. Read, Grep,
+    Glob and git inspection run without asking; other tool calls follow your
+    permission settings. A request with another model switches with `/model`.
 
 Each action takes its model from `models`, then `model`, then the adapter's
 defaults. The claude adapter runs `deep` and `review` on opus and the other
@@ -419,5 +544,7 @@ defined with `default`, so your own |nvim_set_hl()| wins.
   AgenticReviewRef       path:line references, links to Underlined
   AgenticReviewMeta      answer times and cancellations, links to Comment
   AgenticReviewError     agent errors, links to DiagnosticError
+  AgenticReviewDetail    a finding's text under its line in the diff, links
+                         to Comment
 
  vim:tw=78:ts=8:ft=help:norl:

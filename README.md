@@ -23,7 +23,7 @@ Code review in Neovim with a read-only coding agent next to the diff, on a branc
 {
   "AlucarDWeb/agentic-review.nvim",
   version = "*",
-  cmd = { "Review", "ReviewClose", "ReviewCancel", "ReviewRefs", "ReviewAsk", "ReviewComment", "ReviewCommentAll", "ReviewThread", "ReviewSubmit", "ReviewFiles" },
+  cmd = { "Review", "ReviewClose", "ReviewCancel", "ReviewRefs", "ReviewAsk", "ReviewComment", "ReviewCommentAll", "ReviewThread", "ReviewSubmit", "ReviewFiles", "ReviewFindings" },
   keys = {
     { "<leader>R", "", desc = "+review" },
     { "<leader>Rr", "<cmd>Review<cr>", desc = "Review branch vs base" },
@@ -51,6 +51,7 @@ Code review in Neovim with a read-only coding agent next to the diff, on a branc
     { "<leader>Rn", function() require("agentic_review").next(1) end, desc = "Next file" },
     { "<leader>RN", function() require("agentic_review").next(-1) end, desc = "Previous file" },
     { "<leader>Rt", function() require("agentic_review").files() end, desc = "Go to a changed file" },
+    { "<leader>RF", "<cmd>ReviewFindings<cr>", desc = "Findings by severity" },
     { "<leader>Rv", function() require("agentic_review").toggle_viewed() end, desc = "Mark viewed, go to next" },
     { "<leader>Rl", "<cmd>ReviewRefs<cr>", desc = "Answer refs to quickfix" },
     { "<leader>Rc", "<cmd>ReviewCancel<cr>", desc = "Cancel agent answer" },
@@ -84,6 +85,7 @@ git clone --depth 1 --branch v0.1.1 https://github.com/AlucarDWeb/agentic-review
 | `:Review!` | Any of the above, ignoring the saved session |
 | `:ReviewAsk [question]` | Ask the agent about the range |
 | `:ReviewFiles` | Go to a changed file |
+| `:ReviewFindings` | List the findings by severity, and open or comment on one |
 | `:ReviewComment` | Comment on the line or range, in your pending GitHub review |
 | `:ReviewCommentAll` | Add every finding not yet on GitHub to your pending review |
 | `:ReviewThread` | Read the open GitHub threads on the line, and reply to them |
@@ -94,7 +96,7 @@ git clone --depth 1 --branch v0.1.1 https://github.com/AlucarDWeb/agentic-review
 
 ## Agent actions
 
-`require("agentic_review").action(name)` works on the hunk under the cursor, the visual selection, or the whole file from the files panel. In the review tab the answer goes to the agent pane, elsewhere to a float under the code.
+`require("agentic_review").action(name)` works on the hunk under the cursor, the visual selection, or the whole file from the files panel. In the review tab the answer goes to the agent pane, elsewhere to a float under the code. With `interactive = true` the agent pane runs pi or Claude Code in a terminal instead, and actions are sent to that session.
 
 | Action | What the agent does |
 | --- | --- |
@@ -113,11 +115,15 @@ git clone --depth 1 --branch v0.1.1 https://github.com/AlucarDWeb/agentic-review
 | | `v` | Toggle viewed |
 | | `t` | Run the tour again |
 | | `r` | Review the whole change |
-| Files panel, agent pane | `C` | Add every finding to your pending GitHub review |
+| Files panel, agent pane | `F` | List the findings by severity |
+| | `C` | Add every finding to your pending GitHub review |
 | | `S` | Submit your GitHub review |
 | Agent pane | `<CR>`, `gf` | Jump to the `path:line` under the cursor |
 | | `c` | Draft a GitHub comment from the finding |
 | Diff | `]c`, `[c` | Next or previous hunk |
+| Findings picker | `j`, `k` | Move between findings |
+| | `<CR>` | Open the finding's line |
+| | `c` | Open it and draft a GitHub comment |
 | Go-to-file picker | `j`, `k` | Move between files |
 | | `/` | Filter by a fuzzy match on the path |
 | | `v` | Toggle viewed |
@@ -134,7 +140,7 @@ git clone --depth 1 --branch v0.1.1 https://github.com/AlucarDWeb/agentic-review
 
 ```lua
 {
-  agent = "claude", -- adapter name, or an adapter table
+  agent = "claude", -- adapter name, adapter table, or a list such as { "pi", "claude" }: the first one installed
   adapters = {},
   model = nil, -- every action not in `models`
   models = {}, -- model per action, e.g. { deep = "opus" }
@@ -149,21 +155,27 @@ git clone --depth 1 --branch v0.1.1 https://github.com/AlucarDWeb/agentic-review
   max_context_lines = 300, -- longest hunk or selection sent with an action
   max_tour_lines = 1500, -- diff sent with the tour to agents without a shell
   review_prompt = nil, -- your own review prompt or slash command, see :h agentic-review-review-prompt
+  review_shell = false, -- let the review run any shell command, see :h agentic-review-review-shell
+  interactive = false, -- the agent's own interface in the agent pane, see :h agentic-review-interactive
+  findings_picker = false, -- open the findings picker after a review that found something
 }
 ```
 
 ### Custom adapters
 
-An adapter is a table in `adapters`, picked by name with `agent`. The built-in ones in `lua/agentic_review/init.lua` are complete examples.
+An adapter is a table in `adapters`, picked by name with `agent`. The built-in ones in `lua/agentic_review/init.lua` are complete examples. A table under a built-in name changes only the fields it sets, for example `pi = { extensions = { "~/path/to/provider" }, skills = { "~/path/to/skill" } }` to load a provider extension and a skill into pi.
 
 | Field | Meaning |
 | --- | --- |
-| `cmd(ctx)` | Returns the argv, and optionally a session id. `ctx` has `system`, `prompt`, `session`, `root`, `label` and `model` |
+| `cmd(ctx, adapter)` | Returns the argv, and optionally a session id. `ctx` has `system`, `prompt`, `session`, `root`, `label`, `model`, `action` and `full_shell`, true for a review with `review_shell` |
 | `persistent` | Start the process once and write each prompt to its stdin with `encode(prompt)` |
 | `models` | Default model per action (`tour`, `explain`, `explore`, `deep`, `ask`, `review`) |
 | `set_model(model)` | Returns a stdin line that switches a running persistent process to `model` |
 | `parse(line, emit)` | Turns one stdout line into `emit.text(s)`, `emit.tool(name, input)`, `emit.session(id)` and `emit.done(err)` |
 | `shell` | Whether the agent can run git |
+| `bin`, `available(adapter)` | The executable, or a check, for picking the first installed agent from a list in `agent` |
+| `interactive(ctx, adapter)` | Returns the argv of the agent's own interface for the interactive pane, and optionally a session id and environment variables |
+| `deliver(t, msg)`, `reply(line)`, `abort(t)`, `tagged` | How the interactive pane sends requests and reads replies, see `:h agentic-review-adapter` |
 
 ### Highlights
 
@@ -178,6 +190,7 @@ Each group is defined with `default`, so your own `vim.api.nvim_set_hl()` wins.
 | `AgenticReviewRef` | `path:line` references | `Underlined` |
 | `AgenticReviewMeta` | Answer times and cancellations | `Comment` |
 | `AgenticReviewError` | Agent errors | `DiagnosticError` |
+| `AgenticReviewDetail` | A finding's text under its line in the diff | `Comment` |
 
 ## Development
 

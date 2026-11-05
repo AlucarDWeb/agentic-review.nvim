@@ -91,9 +91,12 @@ H.run(function()
     }),
     painted("[high]")
   )
+  local timing = vim.tbl_filter(function(l)
+    return l:match("^_%d+s_$") ~= nil
+  end, lines(pane))[1]
   check(
     "timing line dimmed",
-    vim.deep_equal(painted("s_"), { lines(pane)[#lines(pane) - 1] .. "=AgenticReviewMeta" }),
+    vim.deep_equal(painted("s_"), { tostring(timing) .. "=AgenticReviewMeta" }),
     painted("s_")
   )
   local badge = vim.api.nvim_get_hl(0, { name = "AgenticReviewHigh" })

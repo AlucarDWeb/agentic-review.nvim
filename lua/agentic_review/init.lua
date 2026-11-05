@@ -3,7 +3,8 @@ local M = {}
 M.adapters = {}
 
 M.config = {
-  -- Name of an adapter in `adapters` or M.adapters, or an adapter table.
+  -- Name of an adapter in `adapters` or M.adapters, an adapter table, or a list of names: the first one whose
+  -- agent is installed.
   agent = "claude",
   adapters = {},
   model = nil,
@@ -20,7 +21,16 @@ M.config = {
   max_tour_lines = 1500,
   -- Message sent as is for a whole-change review instead of the built-in prompt, or a function returning it.
   review_prompt = nil,
+  -- Give the agent a shell that runs any command during the whole-change review, or a function deciding it.
+  review_shell = false,
+  -- Run the agent's own interface in the review tab's agent pane, for adapters that have one.
+  interactive = false,
+  -- Open the findings picker when a review finds something.
+  findings_picker = false,
 }
+
+local ROOT = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h:h:h")
+local PI_EXTENSION = ROOT .. "/pi/agentic-review.ts"
 
 local function decode(line)
   local ok, ev = pcall(vim.json.decode, line, { luanil = { object = true, array = true } })
@@ -55,7 +65,7 @@ M.adapters.claude = {
       "--tools",
       "Read,Grep,Glob,Bash",
       "--allowedTools",
-      CLAUDE_TOOLS,
+      ctx.full_shell and "Read,Grep,Glob,Bash" or CLAUDE_TOOLS,
       -- dontAsk denies every tool call outside the allowlist instead of prompting, which headless mode cannot do.
       "--permission-mode",
       "dontAsk",
@@ -105,30 +115,135 @@ M.adapters.claude = {
       emit.done(ev.is_error and (ev.result or ev.subtype) or nil)
     end
   end,
+  bin = "claude",
+  interactive = function(ctx)
+    -- SessionStart says the prompt is ready for input, and Stop carries each finished reply. Both append their hook
+    -- input to the outbox as one line.
+    local hook = { type = "command", command = ("{ tr -d '\\n'; echo; } >> %s"):format(vim.fn.shellescape(ctx.outbox)) }
+    local hooks = { { hooks = { hook } } }
+    local cmd = {
+      "claude",
+      "--settings",
+      vim.json.encode({ hooks = { SessionStart = hooks, Stop = hooks } }),
+      "--allowedTools",
+      CLAUDE_TOOLS,
+      "--append-system-prompt",
+      ctx.system,
+      "--name",
+      "review: " .. ctx.label,
+    }
+    if ctx.model then
+      vim.list_extend(cmd, { "--model", ctx.model })
+    end
+    if ctx.session then
+      vim.list_extend(cmd, { "--resume", ctx.session })
+    end
+    return cmd
+  end,
+  -- Claude Code reads its input from the terminal, so requests are pasted into the prompt once it is ready.
+  deliver = function(t, msg)
+    if not t.ready then
+      t.waiting = msg
+      return
+    end
+    local function paste()
+      vim.fn.chansend(t.job, "\27[200~" .. msg.prompt .. "\27[201~")
+      vim.defer_fn(function()
+        pcall(vim.fn.chansend, t.job, "\r")
+      end, 150)
+    end
+    if msg.model and msg.model ~= t.model then
+      t.model = msg.model
+      vim.fn.chansend(t.job, "/model " .. msg.model .. "\r")
+      return vim.defer_fn(paste, 500)
+    end
+    paste()
+  end,
+  reply = function(line)
+    local ev = decode(line)
+    if not ev then
+      return
+    end
+    if ev.hook_event_name == "SessionStart" then
+      return { ready = true, session = ev.session_id }
+    end
+    return { text = ev.last_assistant_message, session = ev.session_id }
+  end,
+  abort = function(t)
+    pcall(vim.fn.chansend, t.job, "\27")
+  end,
 }
+
+local function pi_session(ctx)
+  return ctx.session or ("review-" .. vim.fn.sha256(ctx.root .. ctx.label .. vim.uv.hrtime()):sub(1, 24))
+end
+
+local function pi_resources(cmd, a)
+  for _, path in ipairs(a.extensions or {}) do
+    vim.list_extend(cmd, { "-e", vim.fn.expand(path) })
+  end
+  for _, path in ipairs(a.skills or {}) do
+    vim.list_extend(cmd, { "--skill", vim.fn.expand(path) })
+  end
+  return cmd
+end
 
 M.adapters.pi = {
   persistent = true,
-  -- pi cannot limit bash to git commands, so it runs without a shell.
+  -- pi cannot limit bash to git commands, so it runs without a shell unless the review asks for a full one.
   shell = false,
-  cmd = function(ctx)
-    local session = ctx.session or ("review-" .. vim.fn.sha256(ctx.root .. ctx.label .. vim.uv.hrtime()):sub(1, 24))
-    local cmd = {
-      "pi",
-      "--mode",
-      "rpc",
-      "--no-extensions",
-      "--no-mcp",
-      "--no-skills",
+  -- Paths loaded with -e and --skill, such as a model provider extension. Discovery stays off.
+  extensions = {},
+  skills = {},
+  bin = "pi",
+  -- pi without one of its configured extensions would start on a model that is not set up, so it counts as
+  -- missing.
+  available = function(a)
+    if vim.fn.executable("pi") ~= 1 then
+      return false
+    end
+    for _, path in ipairs(a.extensions or {}) do
+      if not vim.uv.fs_stat(vim.fn.expand(path)) then
+        return false
+      end
+    end
+    return true
+  end,
+  -- Replies carry the id of the request they answer, so a prompt typed in the session is told apart.
+  tagged = true,
+  interactive = function(ctx, a)
+    a = a or M.adapters.pi
+    local session = pi_session(ctx)
+    local cmd = pi_resources({ "pi", "--no-extensions", "--no-mcp", "--no-skills", "-e", PI_EXTENSION }, a)
+    vim.list_extend(cmd, {
       "--tools",
-      "read,grep,find,ls",
+      "read,grep,find,ls,bash",
       "--append-system-prompt",
       ctx.system,
       "--session-id",
       session,
       "--name",
       "review: " .. ctx.label,
-    }
+    })
+    if ctx.model then
+      vim.list_extend(cmd, { "--model", ctx.model })
+    end
+    return cmd, session, { AGENTIC_REVIEW_DIR = ctx.dir }
+  end,
+  cmd = function(ctx, a)
+    a = a or M.adapters.pi
+    local session = pi_session(ctx)
+    local cmd = pi_resources({ "pi", "--mode", "rpc", "--no-extensions", "--no-mcp", "--no-skills" }, a)
+    vim.list_extend(cmd, {
+      "--tools",
+      ctx.full_shell and "read,grep,find,ls,bash" or "read,grep,find,ls",
+      "--append-system-prompt",
+      ctx.system,
+      "--session-id",
+      session,
+      "--name",
+      "review: " .. ctx.label,
+    })
     if ctx.model then
       vim.list_extend(cmd, { "--model", ctx.model })
     end
@@ -245,6 +360,7 @@ local SEVERITY_HL =
 local STORE = vim.fn.stdpath("state") .. "/agentic_review.json"
 local ns = vim.api.nvim_create_namespace("agentic_review")
 local cns = vim.api.nvim_create_namespace("agentic_review_comments")
+local ans = vim.api.nvim_create_namespace("agentic_review_align")
 local pns = vim.api.nvim_create_namespace("agentic_review_pane")
 local BADGES = {
   high = { "AgenticReviewHigh", "DiagnosticError" },
@@ -299,6 +415,7 @@ local function define_highlights()
     AgenticReviewTitle = "Title",
     AgenticReviewMeta = "Comment",
     AgenticReviewError = "DiagnosticError",
+    AgenticReviewDetail = "Comment",
   }
   for name, target in pairs(links) do
     vim.api.nvim_set_hl(0, name, { link = target, default = true })
@@ -418,17 +535,62 @@ local function notify(msg, level)
   vim.notify(msg, level or vim.log.levels.INFO, { title = "Review" })
 end
 
-local function adapter_name()
+local merged = {}
+
+-- A table in `adapters` under a built-in name changes only the fields it sets. The merge is kept, since a new
+-- adapter table restarts the agent.
+local function lookup(name)
+  local own, base = M.config.adapters[name], M.adapters[name]
+  if not (own and base) then
+    return own or base
+  end
+  local m = merged[name]
+  if not (m and m.own == own and m.base == base) then
+    m = { own = own, base = base, value = vim.tbl_extend("force", base, own) }
+    merged[name] = m
+  end
+  return m.value
+end
+
+local function installed(a)
+  if a.available then
+    return a.available(a)
+  end
+  return not a.bin or vim.fn.executable(a.bin) == 1
+end
+
+-- A list of names picks the first adapter whose agent is installed, or the first name when none is.
+local function chosen()
   local a = M.config.agent
+  if type(a) ~= "table" or not vim.islist(a) then
+    return a
+  end
+  for _, name in ipairs(a) do
+    local found = lookup(name)
+    if found and installed(found) then
+      return name
+    end
+  end
+  return a[1]
+end
+
+local function adapter_name()
+  local a = chosen()
   return type(a) == "table" and (a.name or "custom") or a
 end
 
 local function adapter()
-  local a = M.config.agent
-  if type(a) == "string" then
-    a = M.config.adapters[a] or M.adapters[a]
+  local a = chosen()
+  if type(a) ~= "string" then
+    return a
   end
-  return a
+  return lookup(a)
+end
+
+-- For :checkhealth: the agent in use, its adapter and whether it is installed.
+function M._agent()
+  local a = adapter()
+  return adapter_name(), a, a and installed(a)
 end
 
 local function win_ok(win)
@@ -686,30 +848,34 @@ local function status(c)
   end
 end
 
-local function rules(a, where)
+local function rules(a, where, full_shell)
   local lines = {}
-  if a.shell then
-    lines[1] = "Your shell runs only single git inspection commands (diff, show, log, blame, grep), "
-      .. "without pipes or &&. Use the file tools for everything else."
+  if full_shell then
+    lines[1] = "Your shell runs any command, for the steps the review asks for. A command can run for minutes, "
+      .. "so give each one a timeout that covers it. Never edit files, commit, push or change the checked-out branch."
+  else
+    if a.shell then
+      lines[1] = "Your shell runs only single git inspection commands (diff, show, log, blame, grep), "
+        .. "without pipes or &&. Use the file tools for everything else."
+    end
+    lines[#lines + 1] = "You are read-only: never try to edit files or run anything other than git inspection commands."
   end
   return vim.list_extend(lines, {
-    "You are read-only: never try to edit files or run anything other than git inspection commands.",
     where,
     "Cite code as path:line relative to the repository root, so the reader can jump to it.",
     "Say when something is unverified and how to check it.",
   })
 end
 
-local function system_prompt(a)
-  local lines = {
-    "You are guiding a developer through a code review inside Neovim.",
+local function change_context(shell, lines)
+  vim.list_extend(lines, {
     ("The change under review is %s. Base commit: %s. Head: %s."):format(
       state.label,
       state.base,
       state.head and ("commit " .. state.head) or "the working tree"
     ),
-  }
-  if not a.shell then
+  })
+  if not shell then
     lines[#lines + 1] = "You have no shell, so you cannot run git. Each message includes the diff it is about; "
       .. "read files in the working tree for surrounding code."
     if state.head then
@@ -725,12 +891,20 @@ local function system_prompt(a)
       state.base
     )
   end
+  return lines
+end
+
+local function system_prompt(a, full_shell)
+  local lines =
+    change_context(a.shell or full_shell, { "You are guiding a developer through a code review inside Neovim." })
   vim.list_extend(
     lines,
     rules(
       a,
       "Your answers appear in a narrow Markdown side panel that adds its own heading per answer. Do not write "
-        .. "headings, keep answers short, and avoid tables and long code blocks."
+        .. "headings, keep answers short, and avoid tables and long code blocks. Show a report that a command or "
+        .. "skill produces as it is, headings included.",
+      full_shell
     )
   )
   return table.concat(lines, "\n")
@@ -791,13 +965,15 @@ end
 local function spawn(c, a, prompt)
   c.stderr = ""
   local argv, session = a.cmd({
-    system = c.kind == "review" and system_prompt(a) or quick_prompt(c, a),
+    system = c.kind == "review" and system_prompt(a, c.full_shell) or quick_prompt(c, a),
     label = c.label,
     root = c.root,
     model = c.model,
     session = c.session,
     prompt = prompt,
-  })
+    action = c.action,
+    full_shell = c.full_shell,
+  }, a)
   if session and session ~= c.session then
     c.session = session
     remember_session(c)
@@ -873,6 +1049,257 @@ finish = function(c, err)
   pump(c)
 end
 
+local function model_for(a, action)
+  return M.config.models[action] or M.config.model or (a.models or {})[action]
+end
+
+-- Interactive pane: the agent's own interface runs in a terminal in the agent pane. Requests go to it through the
+-- adapter's deliver, or as JSON lines appended to the session's inbox file, and the agent appends each finished
+-- reply to its outbox file.
+
+local open_terminal = vim.fn.has("nvim-0.11") == 1
+    and function(argv, opts)
+      return vim.fn.jobstart(argv, vim.tbl_extend("force", opts, { term = true }))
+    end
+  or vim.fn.termopen
+
+local function show_in_pane(buf)
+  local win = state.wins.agent
+  if win_ok(win) and vim.api.nvim_buf_is_valid(buf) then
+    vim.wo[win].winfixbuf = false
+    vim.api.nvim_win_set_buf(win, buf)
+    vim.wo[win].winfixbuf = true
+  end
+end
+
+-- The agent pane is wiped when hidden, so it is kept while a session shows in its window.
+local function restore_pane()
+  local buf = state.bufs.agent
+  if not (buf and vim.api.nvim_buf_is_valid(buf)) then
+    return
+  end
+  vim.bo[buf].bufhidden = "wipe"
+  if win_ok(state.wins.agent) then
+    show_in_pane(buf)
+  elseif #vim.fn.win_findbuf(buf) == 0 then
+    pcall(vim.api.nvim_buf_delete, buf, { force = true })
+  end
+end
+
+local function interactive(c, a)
+  return c.kind == "review" and M.config.interactive and a.interactive ~= nil
+end
+
+local function interactive_prompt()
+  local lines = change_context(true, {
+    "You are guiding a developer through a code review. You run in a terminal pane next to the diff in Neovim, "
+      .. "which sends you requests, and the developer can also type to you directly.",
+  })
+  return table.concat(
+    vim.list_extend(lines, {
+      "Never edit files, commit, push or change the checked-out branch unless the developer types that request.",
+      "A tool call can be blocked or wait for the developer's approval. When one is blocked, carry on with the "
+        .. "tools you have.",
+      "Only the whole-change review may need a shell beyond git inspection. A command can run for minutes, so give "
+        .. "each one a timeout that covers it.",
+      "The pane is narrow: keep answers short and avoid wide tables. Show a report that a command or skill "
+        .. "produces as it is, headings included.",
+      "Cite code as path:line relative to the repository root, so the reader can jump to it.",
+      "Say when something is unverified and how to check it.",
+    }),
+    "\n"
+  )
+end
+
+local function append_line(path, value)
+  local file = io.open(path, "a")
+  if file then
+    file:write(vim.json.encode(value), "\n")
+    file:close()
+  end
+end
+
+local function deliver(t, msg)
+  if t.a.deliver then
+    return t.a.deliver(t, msg)
+  end
+  append_line(t.inbox, msg)
+end
+
+local function abort_session(t)
+  if t.a.abort then
+    return t.a.abort(t)
+  end
+  append_line(t.inbox, { type = "abort" })
+end
+
+-- Set after the review code: keeps the findings of a reply to a prompt the developer typed in the session.
+local typed_reply
+
+local function on_reply(c, t, r)
+  if r.session and r.session ~= c.session then
+    c.session = r.session
+    remember_session(c)
+  end
+  if r.ready then
+    t.ready = true
+    local waiting = t.waiting
+    t.waiting = nil
+    if waiting then
+      vim.defer_fn(function()
+        if c.term == t then
+          deliver(t, waiting)
+        end
+      end, 300)
+    end
+    return
+  end
+  local text = type(r.text) == "string" and r.text or ""
+  if c.busy and (not t.a.tagged or (r.id ~= nil and r.id == c.pending)) then
+    c.reply = text
+    pane_write(c, "text", text)
+    finish(c, r.aborted and "cancelled in the session" or nil)
+  elseif r.id == nil then
+    typed_reply(text)
+  end
+end
+
+local function read_replies(c, t)
+  local file = io.open(t.outbox, "r")
+  if not file then
+    return
+  end
+  file:seek("set", t.offset)
+  local data = file:read("*a") or ""
+  file:close()
+  t.offset = t.offset + #data
+  t.partial = t.partial .. data
+  while c.term == t do
+    local nl = t.partial:find("\n", 1, true)
+    if not nl then
+      break
+    end
+    local line = t.partial:sub(1, nl - 1)
+    t.partial = t.partial:sub(nl + 1)
+    local r = line ~= "" and (t.a.reply and t.a.reply(line) or decode(line))
+    if type(r) == "table" then
+      on_reply(c, t, r)
+    end
+  end
+end
+
+local function end_interactive(c, t, code)
+  if t.timer then
+    t.timer:stop()
+    t.timer:close()
+    t.timer = nil
+  end
+  local live = c.term == t
+  if live then
+    read_replies(c, t)
+    c.term = nil
+  end
+  vim.fn.delete(t.dir, "rf")
+  local last = ""
+  for _, line in ipairs(vim.api.nvim_buf_is_valid(t.buf) and vim.api.nvim_buf_get_lines(t.buf, 0, -1, false) or {}) do
+    if vim.trim(line) ~= "" and not line:match("^%[Process exited") then
+      last = vim.trim(line)
+    end
+  end
+  if displays(state.wins.agent, t.buf) then
+    restore_pane()
+  end
+  pcall(vim.api.nvim_buf_delete, t.buf, { force = true })
+  if live then
+    if code ~= 0 then
+      local note = ("The agent session exited with code %d"):format(code)
+      notify(last ~= "" and (note .. ": " .. last) or note, vim.log.levels.WARN)
+    end
+    if c.busy then
+      finish(c, "the agent session exited")
+    else
+      status(c)
+    end
+  end
+end
+
+local function close_interactive(c)
+  local t = c.term
+  if t then
+    c.term = nil
+    pcall(vim.fn.jobstop, t.job)
+  end
+end
+
+-- Starts the session in the agent pane without moving the cursor. `model` is the model it starts on.
+local function start_interactive(c, a, model)
+  if not win_ok(state.wins.agent) then
+    return nil, "the agent pane is closed"
+  end
+  local dir = vim.fn.tempname()
+  vim.fn.mkdir(dir, "p")
+  local t = { a = a, dir = dir, inbox = dir .. "/inbox", outbox = dir .. "/outbox", offset = 0, partial = "" }
+  t.model = model
+  for _, path in ipairs({ t.inbox, t.outbox }) do
+    local file = io.open(path, "w")
+    if file then
+      file:close()
+    end
+  end
+  local ok, argv, session, env = pcall(a.interactive, {
+    system = interactive_prompt(),
+    label = c.label,
+    root = c.root,
+    model = model,
+    session = c.session,
+    dir = dir,
+    inbox = t.inbox,
+    outbox = t.outbox,
+  }, a)
+  if not ok then
+    vim.fn.delete(dir, "rf")
+    return nil, argv
+  end
+  if session and session ~= c.session then
+    c.session = session
+    remember_session(c)
+  end
+  t.buf = vim.api.nvim_create_buf(false, true)
+  c.term, c.adapter = t, a
+  vim.bo[state.bufs.agent].bufhidden = "hide"
+  show_in_pane(t.buf)
+  local started, job
+  vim.api.nvim_win_call(state.wins.agent, function()
+    started, job = pcall(open_terminal, argv, {
+      cwd = c.root,
+      env = env,
+      on_exit = function(_, code)
+        vim.schedule(function()
+          end_interactive(c, t, code)
+        end)
+      end,
+    })
+  end)
+  if not started or job <= 0 then
+    c.term = nil
+    end_interactive(c, t, 0)
+    return nil, started and (tostring(argv[1]) .. " is not executable") or tostring(job)
+  end
+  t.job = job
+  t.timer = vim.uv.new_timer()
+  t.timer:start(
+    250,
+    250,
+    vim.schedule_wrap(function()
+      if c.term == t then
+        read_replies(c, t)
+      end
+    end)
+  )
+  status(c)
+  return t
+end
+
 pump = function(c)
   if c.busy or #c.queue == 0 then
     return status(c)
@@ -884,22 +1311,46 @@ pump = function(c)
       pcall(c.job.kill, c.job, 15)
       c.job = nil
     end
+    close_interactive(c)
     c.session = nil
   end
   c.adapter = a
-  local model = M.config.models[item.action] or M.config.model or (a.models or {})[item.action]
+  local model = model_for(a, item.action)
+  local full_shell = item.full_shell == true
   local switch = a.persistent and c.job and model ~= c.model
+  local reshell = c.job and full_shell ~= (c.full_shell == true)
   c.busy, c.reply, c.on_done, c.started = true, "", item.on_done, vim.uv.now()
-  c.action, c.model = item.action, model
+  c.action, c.model, c.full_shell = item.action, model, full_shell
   pane_write(c, "header", item.header)
   status(c)
-  local ok, err = pcall(function()
-    if switch and model and a.set_model then
-      c.job:write(a.set_model(model) .. "\n")
-    elseif switch then
-      -- The new process resumes the same session, so only the model changes.
+  if interactive(c, a) then
+    if c.job then
       pcall(c.job.kill, c.job, 15)
       c.job = nil
+    end
+    local ok, err = pcall(function()
+      c.pending = tostring(vim.uv.hrtime())
+      if not c.term then
+        local _, e = start_interactive(c, a, model)
+        if not c.term then
+          error(e, 0)
+        end
+      end
+      deliver(c.term, { id = c.pending, prompt = item.prompt, model = model, full_shell = full_shell })
+    end)
+    if not ok then
+      finish(c, err)
+    end
+    return
+  end
+  close_interactive(c)
+  local ok, err = pcall(function()
+    if reshell or (switch and not (model and a.set_model)) then
+      -- The new process resumes the same session, so only the model or the shell changes.
+      pcall(c.job.kill, c.job, 15)
+      c.job = nil
+    elseif switch then
+      c.job:write(a.set_model(model) .. "\n")
     end
     if a.persistent then
       if not c.job then
@@ -915,20 +1366,26 @@ pump = function(c)
   end
 end
 
-local function send(c, action, header, prompt, on_done)
-  table.insert(c.queue, { action = action, header = header, prompt = prompt, on_done = on_done })
+local function send(c, action, header, prompt, on_done, full_shell)
+  table.insert(
+    c.queue,
+    { action = action, header = header, prompt = prompt, on_done = on_done, full_shell = full_shell }
+  )
   pump(c)
 end
 
-local function ask(action, header, prompt, on_done)
-  send(agent, action, header, prompt, on_done)
+local function ask(action, header, prompt, on_done, full_shell)
+  send(agent, action, header, prompt, on_done, full_shell)
 end
 
 local function stop(c)
-  local job = c.job
+  local job, busy = c.job, c.busy
   c.job, c.busy, c.queue, c.on_done = nil, false, {}, nil
   if job then
     pcall(job.kill, job, 15)
+  end
+  if c.term and busy then
+    abort_session(c.term)
   end
 end
 
@@ -1177,6 +1634,7 @@ local function clear_marks()
   for _, win in ipairs({ state.wins.base, state.wins.head }) do
     if win_ok(win) then
       vim.api.nvim_buf_clear_namespace(vim.api.nvim_win_get_buf(win), cns, 0, -1)
+      vim.api.nvim_buf_clear_namespace(vim.api.nvim_win_get_buf(win), ans, 0, -1)
     end
   end
 end
@@ -1191,7 +1649,7 @@ end
 
 -- Diff windows do not wrap, so a mark goes at the right edge and in the sign column, where a long line cannot
 -- push it off screen.
-local function mark(win, lnum, text, hl, sign)
+local function mark(win, lnum, text, hl, sign, below)
   local max = math.max(10, math.floor(vim.api.nvim_win_get_width(win) / 2))
   if vim.fn.strdisplaywidth(text) > max then
     text = vim.fn.strcharpart(text, 0, max - 1) .. "…"
@@ -1201,6 +1659,86 @@ local function mark(win, lnum, text, hl, sign)
     virt_text_pos = "right_align",
     sign_text = sign,
     sign_hl_group = hl,
+    virt_lines = below and #below > 0 and below or nil,
+  })
+end
+
+-- A finding's detail as virtual lines under its line, wrapped to the text area of the window.
+local function detail_lines(win, detail, hl)
+  local out = {}
+  if not detail or vim.trim(detail) == "" then
+    return out
+  end
+  local info = vim.fn.getwininfo(win)[1]
+  local width = math.max(20, vim.api.nvim_win_get_width(win) - (info and info.textoff or 0) - 4)
+  for _, rest in ipairs(vim.split(detail, "\n", { plain = true })) do
+    while vim.fn.strdisplaywidth(rest) > width do
+      local head = vim.fn.strcharpart(rest, 0, width)
+      local space = head:match(".*()%s")
+      if space and space > 1 then
+        head, rest = rest:sub(1, space - 1), rest:sub(space + 1)
+      else
+        rest = rest:sub(#head + 1)
+      end
+      out[#out + 1] = head
+    end
+    out[#out + 1] = rest
+  end
+  return vim.tbl_map(function(line)
+    return { { "  ▎ ", hl }, { line, "AgenticReviewDetail" } }
+  end, out)
+end
+
+-- The line of the other side of the diff that shows on the same row as `lnum`, from vim.diff indices. Inside a
+-- changed block the rows only line up again after it, which is enough to keep the rest of the file level. Zero
+-- means above the first line.
+local function aligned_line(indices, lnum, from_head)
+  local delta = 0
+  for _, h in ipairs(indices) do
+    local s, c, os, oc = h[1], h[2], h[3], h[4]
+    if from_head then
+      s, c, os, oc = h[3], h[4], h[1], h[2]
+    end
+    if c == 0 then
+      if lnum <= s then
+        break
+      end
+      delta = delta + oc
+    elseif lnum < s then
+      break
+    elseif lnum <= s + c - 1 then
+      return oc == 0 and os or os + math.min(lnum - s, oc - 1)
+    else
+      delta = delta + oc - c
+    end
+  end
+  return lnum + delta
+end
+
+-- Virtual lines push one side of the diff down, so the other side gets as many blank lines to stay level.
+local function level(win, other, lnum, count)
+  if not win_ok(other) or count == 0 then
+    return
+  end
+  local a, b = vim.api.nvim_win_get_buf(win), vim.api.nvim_win_get_buf(other)
+  local n = vim.api.nvim_buf_line_count(b)
+  if n == 1 and vim.api.nvim_buf_get_lines(b, 0, 1, false)[1] == "" then
+    return
+  end
+  local from_head = win == state.wins.head
+  local indices = (vim.text and vim.text.diff or vim.diff)(
+    buf_text(from_head and b or a),
+    buf_text(from_head and a or b),
+    { result_type = "indices" }
+  )
+  local target = math.min(aligned_line(indices or {}, lnum, from_head), n)
+  local blank = {}
+  for i = 1, count do
+    blank[i] = { { "", "Normal" } }
+  end
+  pcall(vim.api.nvim_buf_set_extmark, b, ans, math.max(target, 1) - 1, 0, {
+    virt_lines = blank,
+    virt_lines_above = target < 1,
   })
 end
 
@@ -1242,10 +1780,13 @@ local function mark_lines()
     end
   end
   local win = f and f.status == "D" and state.wins.base or state.wins.head
+  local other = win == state.wins.base and state.wins.head or state.wins.base
   for _, x in ipairs(state.findings) do
     if f and win_ok(win) and x.path == f.path and not x.posted then
       local hl = SEVERITY_HL[x.severity] or "DiagnosticHint"
-      mark(win, x.line, ("[%s] %s"):format(x.severity, (x.title:gsub("`", ""))), hl, SIGNS[x.severity] or "?")
+      local below = detail_lines(win, x.detail, hl)
+      mark(win, x.line, ("[%s] %s"):format(x.severity, (x.title:gsub("`", ""))), hl, SIGNS[x.severity] or "?", below)
+      level(win, other, x.line, #below)
     end
   end
 end
@@ -2010,6 +2551,7 @@ local function arrange()
     vim.api.nvim_win_set_width(wins.agent, agent_w)
   end
   split_diff()
+  mark_lines()
   state.size = vim.o.columns .. "x" .. vim.o.lines
 end
 
@@ -2097,6 +2639,7 @@ local function layout()
   for _, buf in ipairs({ state.bufs.files, state.bufs.agent }) do
     map(buf, "C", M.comment_all, "Add every finding to your pending GitHub review")
     map(buf, "S", M.submit, "Submit your GitHub review")
+    map(buf, "F", M.findings, "List the findings by severity")
   end
 end
 
@@ -2177,7 +2720,14 @@ local function start(spec, fresh)
   persist()
   status(agent)
   load_threads()
-  if not agent.session and M.config.auto_tour then
+  local a, fresh = adapter(), not agent.session
+  if interactive(agent, a) then
+    local _, err = start_interactive(agent, a, model_for(a, fresh and M.config.auto_tour and "tour" or "ask"))
+    if err then
+      notify("Cannot start the agent session: " .. tostring(err), vim.log.levels.ERROR)
+    end
+  end
+  if fresh and M.config.auto_tour then
     M.tour()
   end
 end
@@ -2318,19 +2868,207 @@ local function add_findings(found, source)
   return added
 end
 
+local SEVERITIES = { "high", "medium", "low", "question" }
+
+-- The review's findings as finding lines under one heading per severity, so <CR> and c work on them.
+local function by_severity(found)
+  local lines = {}
+  for _, s in ipairs(SEVERITIES) do
+    local group = vim.tbl_filter(function(x)
+      return x.severity == s
+    end, found)
+    if #group > 0 then
+      vim.list_extend(lines, { ("### %s%s (%d)"):format(s:sub(1, 1):upper(), s:sub(2), #group), "" })
+      for _, x in ipairs(group) do
+        lines[#lines + 1] = ("[%s] %s:%d: %s"):format(s, x.path, x.line, x.title)
+      end
+      lines[#lines + 1] = ""
+    end
+  end
+  return table.concat(lines, "\n")
+end
+
+local function open_finding(x)
+  local f = find_file(x.path)
+  if not f then
+    return
+  end
+  if f ~= state.current then
+    show(f)
+  end
+  local win = f.status == "D" and state.wins.base or state.wins.head
+  if win_ok(win) then
+    vim.api.nvim_set_current_win(win)
+    pcall(vim.api.nvim_win_set_cursor, win, { x.line, 0 })
+    vim.cmd("normal! zz")
+  end
+end
+
+-- The findings not yet on GitHub, under one heading per severity, high first.
+local function pick_findings()
+  if not state.tab then
+    return notify("No review open. Start one with :Review", vim.log.levels.WARN)
+  end
+  local lines, rows, marks = {}, {}, {}
+  for _, s in ipairs(SEVERITIES) do
+    local group = vim.tbl_filter(function(x)
+      return x.severity == s and not x.posted
+    end, state.findings)
+    table.sort(group, function(a, b)
+      return a.path == b.path and a.line < b.line or a.path < b.path
+    end)
+    if #group > 0 then
+      if #lines > 0 then
+        lines[#lines + 1] = ""
+      end
+      local label = (" %s%s "):format(s:sub(1, 1):upper(), s:sub(2))
+      lines[#lines + 1] = ("%s %d"):format(label, #group)
+      marks[#marks + 1] = { #lines - 1, 0, #label, (BADGES[s] or {})[1] or "Title" }
+      for _, x in ipairs(group) do
+        local where = ("%s:%d"):format(x.path, x.line)
+        lines[#lines + 1] = ("  %s  %s"):format(where, (x.title or ""):gsub("`", ""))
+        rows[#lines] = x
+        marks[#marks + 1] = { #lines - 1, 2, 2 + #where, "AgenticReviewRef" }
+      end
+    end
+  end
+  if #lines == 0 then
+    return notify("No findings to list")
+  end
+  local back = vim.api.nvim_get_current_win()
+  local width = math.min(110, vim.o.columns - 8)
+  local height = math.max(3, math.min(vim.o.lines - 8, #lines))
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].bufhidden = "wipe"
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+  for _, m in ipairs(marks) do
+    vim.api.nvim_buf_set_extmark(buf, pns, m[1], m[2], { end_col = m[3], hl_group = m[4] })
+  end
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = "editor",
+    row = math.floor((vim.o.lines - height) / 2) - 1,
+    col = math.floor((vim.o.columns - width) / 2),
+    width = width,
+    height = height,
+    border = "rounded",
+    style = "minimal",
+    title = " Findings ",
+    title_pos = "left",
+    footer = " j/k move · <CR> open · c comment · q close ",
+    footer_pos = "left",
+  })
+  vim.wo[win].cursorline = true
+  vim.wo[win].wrap = false
+  local closed = false
+  local function close()
+    if not closed then
+      closed = true
+      pcall(vim.api.nvim_win_close, win, true)
+    end
+  end
+  local function row()
+    return vim.api.nvim_win_get_cursor(win)[1]
+  end
+  local function go(step)
+    local i = row() + step
+    while i >= 1 and i <= #lines and not rows[i] do
+      i = i + step
+    end
+    if rows[i] then
+      vim.api.nvim_win_set_cursor(win, { i, 0 })
+    end
+  end
+  local function pick(then_comment)
+    local x = rows[row()]
+    if not x then
+      return
+    end
+    close()
+    open_finding(x)
+    if then_comment then
+      M.comment()
+    end
+  end
+  local function map(lhs, fn)
+    vim.keymap.set("n", lhs, fn, { buffer = buf, nowait = true })
+  end
+  map("j", function()
+    go(1)
+  end)
+  map("k", function()
+    go(-1)
+  end)
+  map("<Down>", function()
+    go(1)
+  end)
+  map("<Up>", function()
+    go(-1)
+  end)
+  map("<CR>", function()
+    pick(false)
+  end)
+  map("c", function()
+    pick(true)
+  end)
+  for _, lhs in ipairs({ "q", "<Esc>" }) do
+    map(lhs, function()
+      close()
+      if win_ok(back) then
+        vim.api.nvim_set_current_win(back)
+      end
+    end)
+  end
+  vim.api.nvim_create_autocmd("WinLeave", {
+    buffer = buf,
+    once = true,
+    callback = function()
+      vim.schedule(close)
+    end,
+  })
+  vim.api.nvim_win_set_cursor(win, { 1, 0 })
+  go(1)
+end
+
+local function take_review(found, outside)
+  add_findings(found, "review")
+  if #found > 0 then
+    pane_write(agent, "summary", by_severity(found))
+    save_transcript()
+  end
+  notify(plural(#found, "finding") .. (outside > 0 and (", %d outside the change"):format(outside) or ""))
+  if #found > 0 and M.config.findings_picker then
+    vim.schedule(pick_findings)
+  end
+end
+
+typed_reply = function(text)
+  local found, outside = parse_findings(text)
+  if #found + outside > 0 then
+    take_review(found, outside)
+  end
+end
+
+function M.findings()
+  pick_findings()
+end
+
 local function review_change()
-  local prompt = M.config.review_prompt
+  local ctx = { root = state.root, base = state.base, head = state.head, pr = state.pr and state.pr.number }
+  ctx.agent = adapter_name()
+  local prompt, shell = M.config.review_prompt, M.config.review_shell
   if type(prompt) == "function" then
-    prompt = prompt({ root = state.root, base = state.base, head = state.head, pr = state.pr and state.pr.number })
+    prompt = prompt(ctx)
+  end
+  if type(shell) == "function" then
+    shell = shell(ctx)
   end
   if type(prompt) ~= "string" or vim.trim(prompt) == "" then
     prompt = whole_change("Review the change below.", review_prompt(adapter().shell))
   end
   ask("review", "## Review\n", prompt, function(reply)
-    local found, outside = parse_findings(reply)
-    add_findings(found, "review")
-    notify(plural(#found, "finding") .. (outside > 0 and (", %d outside the change"):format(outside) or ""))
-  end)
+    take_review(parse_findings(reply))
+  end, shell and true or false)
 end
 
 local function deep_findings(reply)
@@ -2974,6 +3712,10 @@ function M.close()
     return
   end
   stop(agent)
+  if agent.term then
+    close_interactive(agent)
+    restore_pane()
+  end
   persist()
   save_transcript()
   clear_marks()
@@ -3006,6 +3748,7 @@ function M.setup(opts)
   cmd("ReviewThread", M.thread, { desc = "Read the open GitHub comments on the line" })
   cmd("ReviewSubmit", M.submit, { desc = "Submit your pending GitHub review" })
   cmd("ReviewFiles", M.files, { desc = "Go to a changed file in the review" })
+  cmd("ReviewFindings", M.findings, { desc = "List the review's findings by severity" })
   local group = vim.api.nvim_create_augroup("agentic_review", { clear = true })
   define_highlights()
   vim.api.nvim_create_autocmd("ColorScheme", { group = group, callback = define_highlights })
