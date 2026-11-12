@@ -71,7 +71,7 @@ require("agentic_review").setup({})
 Neovim 0.10 and 0.11, a package directory, then `require("agentic_review").setup({})` in your `init.lua`:
 
 ```sh
-git clone --depth 1 --branch v0.1.1 https://github.com/AlucarDWeb/agentic-review.nvim \
+git clone --depth 1 --branch v0.1.2 https://github.com/AlucarDWeb/agentic-review.nvim \
   ~/.local/share/nvim/site/pack/plugins/start/agentic-review.nvim
 ```
 
